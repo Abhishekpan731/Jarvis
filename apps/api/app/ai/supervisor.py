@@ -9,11 +9,12 @@ model said.
 import json
 import re
 
-from jarvis_shared.agents import AGENTS, get_agent
+from jarvis_shared.agents import AGENTS, action_allowed, get_agent
 
 from app.ai.base import LanguageModel
 from app.ai.prompts import PLANNER
 from app.ai.schemas import Plan, PlanStep
+from app.ai.untrusted import quote
 
 _AGENT_IDS = tuple(agent.id for agent in AGENTS)
 _HIGH_RISK_WORDS = ("send", "delete", "pay", "purchase", "deploy", "publish", "transfer")
@@ -26,9 +27,19 @@ def _fallback(message: str) -> Plan:
     Everything else is a direct answer, which the caller must not invent.
     """
     text = message.lower()
-    chosen = [agent_id for agent_id in _AGENT_IDS if re.search(rf"\b{re.escape(agent_id)}\b", text)]
     high = any(word in text for word in _HIGH_RISK_WORDS)
-    if not chosen:
+    steps = []
+    for agent_id in _AGENT_IDS:
+        if re.search(rf"\b{re.escape(agent_id)}\b", text) is None:
+            continue
+        agent = get_agent(agent_id)
+        if agent is None:
+            continue
+        action = f"handle: {message[:120]}"
+        if not action_allowed(agent_id, action):
+            continue
+        steps.append(PlanStep(agent=agent_id, action=action))
+    if not steps:
         return Plan(
             intent="conversation",
             requires_execution=False,
@@ -41,16 +52,20 @@ def _fallback(message: str) -> Plan:
     return Plan(
         intent="delegated",
         requires_execution=True,
-        agents=chosen,
+        agents=[step.agent for step in steps],
         risk="high" if high else "low",
         requires_approval=high,
-        steps=[PlanStep(agent=agent_id, action=f"handle: {message[:120]}") for agent_id in chosen],
+        steps=steps,
     )
 
 
 def validate_plan(plan: Plan) -> Plan:
     """Drop anything the registry does not allow, and force the approval gate."""
-    steps = [step for step in plan.steps if get_agent(step.agent) is not None]
+    steps = [
+        step
+        for step in plan.steps
+        if get_agent(step.agent) is not None and action_allowed(step.agent, step.action)
+    ]
     agents = [agent_id for agent_id in dict.fromkeys(step.agent for step in steps)]
     high = plan.risk == "high" or any(
         word in step.action.lower() for step in steps for word in _HIGH_RISK_WORDS
@@ -72,7 +87,7 @@ async def plan_request(model: LanguageModel | None, message: str) -> Plan:
     messages = [
         {"role": "system", "content": PLANNER},
         {"role": "system", "content": "Available agents: " + ", ".join(_AGENT_IDS)},
-        {"role": "user", "content": message},
+        {"role": "user", "content": quote("user request", message, limit=20_000)},
     ]
     completion = await model.complete(messages, schema={"type": "object"})
     try:

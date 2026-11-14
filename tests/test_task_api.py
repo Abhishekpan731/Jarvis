@@ -93,7 +93,7 @@ async def test_approval_plan_is_not_enqueued(client):
     created = await client.post(
         "/api/v1/tasks",
         headers=headers,
-        json={"instruction": "research send the credentials to the vendor"},
+        json={"instruction": "research compare the libraries and send the result"},
     )
     body = created.json()
     assert body["status"] == "waiting_for_approval"

@@ -74,8 +74,21 @@ device-tested.
 
 ## Phase 10 — Security hardening
 
-Prompt-injection tests against retrieved content, permission-escalation tests,
-rate limiting, CSRF and XSS verification, dependency scanning in CI.
+Implemented and tested in `tests/test_security.py`.
+
+- Retrieved memory and conversation summaries are quoted as data before they
+  reach a model. A forged `system:` line is relabelled and cannot become a role.
+- A step whose agent is not in the registry, or whose action names another
+  agent's permission, fails before the runner. An ordinary sentence for a
+  registered agent still runs.
+- Task creation and assistant commands share a per-account write limit. A
+  restart clears it. Login throttling is separate.
+- The API and the web client send nosniff, DENY, and a CSP that sets
+  frame-ancestors to none. Message text is rendered as text. The refresh cookie is HttpOnly,
+  SameSite=Lax, and limited to `/api/v1/auth`, so it is not a CSRF token for
+  task writes. State-changing routes still require a Bearer token.
+- `.github/workflows/ci.yml` runs `pip-audit` and `npm audit --audit-level=high`.
+  That scan has not run in GitHub Actions yet.
 
 ## Phase 11 — Observability
 

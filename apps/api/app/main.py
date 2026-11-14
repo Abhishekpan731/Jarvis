@@ -25,6 +25,23 @@ if settings.app_env == "production" and len(settings.jwt_secret) < 32:
     raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
 
 app = FastAPI(title="JARVIS", version="0.2.0")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Headers for an API that returns JSON, not HTML.
+
+    The web client renders message text as text. These headers refuse framing
+    and tell a browser not to sniff a JSON body into HTML.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],

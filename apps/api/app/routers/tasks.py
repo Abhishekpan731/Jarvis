@@ -18,6 +18,7 @@ from app.ai.supervisor import plan_request
 from app.integrations.requirements import missing_connection
 from app.db import get_session
 from app.jobs import IdempotencyConflict, lookup_idempotency, request_hash, store_idempotency
+from app.limits import limit_writes
 from app.models import User
 from app.security import error, require_user
 from app.tasks_service import create_task_from_plan
@@ -45,6 +46,7 @@ async def create_task(
     session: AsyncSession = Depends(get_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
+    limit_writes(user.id)
     _reject_lease_fields(body.model_dump())
     digest = request_hash(body.instruction, body.priority)
     if idempotency_key:

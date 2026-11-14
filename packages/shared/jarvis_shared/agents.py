@@ -8,6 +8,7 @@ Permissions are declarative in Phase 1. Nothing grants them at runtime, and no
 agent can exceed the ones listed here.
 """
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -174,3 +175,25 @@ _BY_ID = {agent.id: agent for agent in AGENTS}
 
 def get_agent(agent_id: str) -> AgentSpec | None:
     return _BY_ID.get(agent_id)
+
+
+def action_allowed(agent_id: str, action: str) -> bool:
+    """True only for a registered agent whose action does not name a foreign permission.
+
+    A capability word is not required. The planner writes ordinary sentences, and
+    the demo steps are ordinary sentences. What retrieved text cannot do is name
+    another agent's permission or invent an agent.
+    """
+    agent = get_agent(agent_id)
+    if agent is None or not action.strip():
+        return False
+    text = action.lower()
+    own = {item.lower() for item in agent.permissions}
+    foreign = {
+        permission.lower()
+        for other in AGENTS
+        if other.id != agent.id
+        for permission in other.permissions
+        if permission.lower() not in own
+    }
+    return not any(re.search(rf"\b{re.escape(permission)}\b", text) for permission in foreign)

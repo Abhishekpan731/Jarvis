@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from jarvis_shared.agents import action_allowed
 from jarvis_shared.tasks import IllegalTransition, TaskStatus, apply_transition
 
 from app.integrations.runner import IntegrationStepError
@@ -94,6 +95,12 @@ async def execute_task(
         raise ValueError(task.error)
 
     async def run_step(step: TaskStep) -> tuple[int, str]:
+        if not action_allowed(step.agent_id, step.action):
+            step.status = "failed"
+            raise RuntimeError("permission_denied")
+        if action_requires_approval(step.action):
+            step.status = "failed"
+            raise RuntimeError("approval_required")
         step.status = "running"
         try:
             outcome = await runner(step)
@@ -214,6 +221,11 @@ async def execute_task_durable(
         if step.status == "completed":
             results[step.position] = "skipped"
             continue
+        if not action_allowed(step.agent_id, step.action):
+            await mark_step(step, "failed")
+            await persist(task, TaskStatus.FAILED, "worker", "permission_denied")
+            task.status = TaskStatus.FAILED.value
+            raise RuntimeError("permission_denied")
         if action_requires_approval(step.action):
             await mark_step(step, "failed")
             await persist(task, TaskStatus.FAILED, "worker", "approval_required")

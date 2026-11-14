@@ -30,7 +30,7 @@ def test_high_risk_actions_require_approval():
         agents=["email"],
         risk="low",
         requires_approval=False,
-        steps=[PlanStep(agent="email", action="send the draft to the client")],
+        steps=[PlanStep(agent="email", action="draft_reply and send it to the client")],
     )
     checked = validate_plan(plan)
     assert checked.risk == "high"

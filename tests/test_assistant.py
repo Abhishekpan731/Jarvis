@@ -75,7 +75,7 @@ async def test_high_risk_command_requires_approval_and_is_not_queued(client):
     submitted = await client.post(
         "/api/v1/assistant/commands",
         headers=headers,
-        json={"command": "email delete everything", "source": "google_assistant"},
+        json={"command": "email draft_reply and send it", "source": "google_assistant"},
     )
     assert submitted.status_code == 202, submitted.text
     body = submitted.json()
