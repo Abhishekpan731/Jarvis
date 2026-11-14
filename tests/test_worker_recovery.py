@@ -71,3 +71,51 @@ async def test_crash_then_second_worker_completes():
         task = (await session.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id})).scalar()
     assert job == "completed"
     assert task == "completed"
+
+
+@pytest.mark.asyncio
+async def test_email_step_without_a_connection_fails_permanently(monkeypatch):
+    from app.integrations import google
+
+    monkeypatch.setattr(google, "configured", lambda: True)
+    user_id, task_id = uuid.uuid4(), uuid.uuid4()
+    async with session_scope() as session:
+        session.add(User(id=user_id, email=f"{user_id}@example.com", password_hash="x", display_name="t"))
+        await session.commit()
+    async with session_scope() as session:
+        session.add(Task(id=task_id, user_id=user_id, title="t", instruction="email the inbox", status="created"))
+        session.add(TaskEvent(task_id=task_id, from_status=None, to_status="created", reason="t", actor="t"))
+        session.add(
+            TaskStep(
+                id=uuid.uuid4(),
+                task_id=task_id,
+                position=0,
+                agent_id="email",
+                action="read",
+                risk="low",
+                status="pending",
+                attempt=0,
+            )
+        )
+        await session.flush()
+        job_id = await insert_job(session, user_id=user_id, task_id=task_id)
+        await session.execute(
+            text("UPDATE jobs SET available_at = now() + interval '1 day' WHERE status = 'queued' AND id <> :id"),
+            {"id": job_id},
+        )
+        await session.commit()
+
+    async with session_scope() as session:
+        claimed = await claim_one(session, worker_id="live")
+    await Runner("live")._run_job(claimed)
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                text("SELECT status, last_error FROM jobs WHERE id = :id"), {"id": job_id}
+            )
+        ).one()
+        task = (await session.execute(text("SELECT status, error FROM tasks WHERE id = :id"), {"id": task_id})).one()
+    assert row.status == "failed"
+    assert row.last_error == "integration_required"
+    assert task.status == "failed"
+    assert task.error == "integration_required"

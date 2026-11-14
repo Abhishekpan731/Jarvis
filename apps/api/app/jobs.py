@@ -33,6 +33,9 @@ PERMANENT_ERRORS = frozenset(
         "illegal_transition",
         "validation_error",
         "not_runnable",
+        "integration_required",
+        "integration_not_configured",
+        "integration_token_rejected",
     }
 )
 

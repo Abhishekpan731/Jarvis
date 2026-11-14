@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from app.config import settings
 from app.db import session_scope
 from app.execution import LeaseLost, execute_task_durable
+from app.integrations.runner import IntegrationStepError, run_step
 from app.jobs import (
     claim_one,
     complete_job,
@@ -112,12 +113,15 @@ class Runner:
                 ),
                 still_owner=lambda: self._owns(job_id, token),
                 mark_step=lambda step, status: self._mark(job_id, token, user_id, step, status),
+                runner=lambda step: run_step(user_id, step),
             )
             async with session_scope() as session:
                 await complete_job(session, job_id, token)
             _log("job_completed", worker_id=self.worker, job_id=str(job_id), task_id=str(task_id))
         except LeaseLost:
             _log("lease_lost", worker_id=self.worker, job_id=str(job_id), task_id=str(task_id))
+        except IntegrationStepError as exc:
+            await self._fail(job, str(exc) or "integration_read_failed")
         except RuntimeError as exc:
             code = str(exc) if str(exc) in {
                 "approval_required",
@@ -203,7 +207,7 @@ class Runner:
                 {
                     "status": target.value,
                     "result": json.dumps(task.result) if task.result else None,
-                    "error": None,
+                    "error": reason if target.value == "failed" else None,
                     "task_id": task.id,
                     "job_id": job_id,
                     "user_id": user_id,

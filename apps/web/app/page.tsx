@@ -4,6 +4,7 @@ import {
     ApiError,
     ChatMessage,
     Conversation,
+    IntegrationItem,
     User,
     api,
     clearToken,
@@ -18,6 +19,18 @@ export default function Home() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("code") || params.has("state") || params.has("error")) {
+      sessionStorage.setItem(
+        "jarvis_oauth",
+        JSON.stringify({
+          code: params.get("code") ?? "",
+          state: params.get("state") ?? "",
+          error: params.get("error") ?? "",
+        }),
+      );
+      window.history.replaceState({}, "", "/");
+    }
     api
       .session()
       .then((res) => setUser(res.user))
@@ -130,6 +143,9 @@ function Workspace({
   const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [locale, setLocale] = useState("en");
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
+  const [notice, setNotice] = useState("");
   const [listening, setListening] = useState(false);
   const [canCapture, setCanCapture] = useState(false);
   const abort = useRef<AbortController | null>(null);
@@ -147,6 +163,73 @@ function Workspace({
       .catch(() => setAiConfigured(false));
     setCanCapture(captureAvailable());
   }, []);
+
+  useEffect(() => {
+    const raw = sessionStorage.getItem("jarvis_oauth");
+    if (!raw) return;
+    sessionStorage.removeItem("jarvis_oauth");
+    let saved: { code?: string; state?: string; error?: string };
+    try {
+      saved = JSON.parse(raw) as {
+        code?: string;
+        state?: string;
+        error?: string;
+      };
+    } catch {
+      return;
+    }
+    if (!saved.code && !saved.state && !saved.error) return;
+    void finishRedirect(saved.code ?? "", saved.state ?? "", saved.error ?? "");
+  }, []);
+
+  async function loadIntegrations() {
+    try {
+      const res = await api.integrations();
+      setIntegrations(res.integrations);
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Could not load connections.",
+      );
+    }
+  }
+
+  async function finishRedirect(code: string, state: string, denied: string) {
+    try {
+      await api.finishIntegration(code, state, denied);
+      setNotice("Connected.");
+      setConnectionsOpen(true);
+      await loadIntegrations();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "The connection was not saved.",
+      );
+      setConnectionsOpen(true);
+    }
+  }
+
+  async function connect(provider: string) {
+    setError("");
+    try {
+      const res = await api.connectIntegration(provider);
+      window.location.assign(res.authorize_url);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "Could not start the connection.",
+      );
+    }
+  }
+
+  async function disconnect(provider: string) {
+    setError("");
+    try {
+      await api.disconnectIntegration(provider);
+      await loadIntegrations();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not disconnect.");
+    }
+  }
 
   useEffect(() => {
     if (!active) return;
@@ -333,6 +416,15 @@ function Workspace({
         <div className="mt-6 border-t border-white/10 pt-4 text-sm">
           <p className="truncate text-neutral-300">{user.display_name}</p>
           <button
+            className="mt-2 block text-neutral-300"
+            onClick={() => {
+              setConnectionsOpen(true);
+              void loadIntegrations();
+            }}
+          >
+            Connections
+          </button>
+          <button
             className="mt-2 text-neutral-500"
             onClick={async () => {
               await api.logout().catch(() => undefined);
@@ -368,7 +460,57 @@ function Workspace({
             </p>
           )}
         </div>
+        {notice && <p className="px-4 text-sm text-emerald-300">{notice}</p>}
         {error && <p className="px-4 text-sm text-red-300">{error}</p>}
+        {connectionsOpen && (
+          <section className="border-t border-white/10 px-4 py-3 text-sm">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-neutral-300">Connections</p>
+              <button
+                type="button"
+                className="text-neutral-500"
+                onClick={() => setConnectionsOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <ul className="space-y-2">
+              {integrations.map((item) => (
+                <li
+                  key={item.provider}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <span>
+                    {item.name}
+                    <span className="ml-2 text-neutral-500">
+                      {item.connection?.connected
+                        ? "connected"
+                        : item.configured
+                          ? "not connected"
+                          : "not configured"}
+                    </span>
+                  </span>
+                  {item.connection?.connected ? (
+                    <button
+                      type="button"
+                      onClick={() => void disconnect(item.provider)}
+                    >
+                      Disconnect
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!item.configured}
+                      onClick={() => void connect(item.provider)}
+                    >
+                      Connect
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         <form
           onSubmit={send}
           className="flex gap-2 border-t border-white/10 p-4"

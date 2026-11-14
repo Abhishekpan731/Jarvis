@@ -55,9 +55,12 @@ synthesis are not wired: no speech credential is configured. See
 
 ## Phase 8 — Integrations
 
-OAuth 2.0 connection flow, encrypted token storage, Gmail and Google Calendar
-first, the standardized integration interface so further providers are
-additive.
+Done for Gmail and Google Calendar, without a live Google call. The connection
+flow uses PKCE and a single-use state. Tokens are Fernet ciphertext. The web
+app posts the callback, so the authorization code is not on the API query
+string. A command that needs a missing connection is not queued, and a worker
+does not invent a mailbox or calendar read. No client id is configured, so this
+is not device-tested. Covered by `tests/test_integrations.py`.
 
 ## Phase 9 — Notifications and automations
 

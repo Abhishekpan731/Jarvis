@@ -34,6 +34,18 @@ export type SpeakResult = {
   truncated: boolean;
   audio: null;
 };
+export type IntegrationItem = {
+  provider: string;
+  name: string;
+  configured: boolean;
+  connection: {
+    id: string;
+    provider: string;
+    status: string;
+    connected: boolean;
+    connected_at: string | null;
+  } | null;
+};
 export type CommandResult = {
   request_id: string;
   conversation_id: string;
@@ -150,6 +162,25 @@ export const api = {
     request<{ messages: ChatMessage[] }>(
       `/api/v1/conversations/${id}/messages`,
     ),
+  integrations: () =>
+    request<{ integrations: IntegrationItem[] }>("/api/v1/integrations"),
+  connectIntegration: (provider: string) =>
+    request<{ authorize_url: string; provider: string }>(
+      `/api/v1/integrations/${provider}/connect`,
+      { method: "POST" },
+    ),
+  finishIntegration: (code: string, state: string, errorCode = "") =>
+    request<{ connected: boolean; provider: string }>(
+      "/api/v1/integrations/google/callback",
+      {
+        method: "POST",
+        body: JSON.stringify({ code, state, error_code: errorCode }),
+      },
+    ),
+  disconnectIntegration: (provider: string) =>
+    request<{ disconnected: boolean }>(`/api/v1/integrations/${provider}`, {
+      method: "DELETE",
+    }),
 };
 
 export async function streamMessage(

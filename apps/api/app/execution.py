@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 from jarvis_shared.tasks import IllegalTransition, TaskStatus, apply_transition
 
+from app.integrations.runner import IntegrationStepError
 from app.models import Task, TaskEvent, TaskStep
 
 # A step runner takes the step and returns its outcome. Tests inject one that
@@ -227,6 +228,12 @@ async def execute_task_durable(
                 outcome = f"{step.agent_id}: completed"
             else:
                 outcome = await runner(step)
+        except IntegrationStepError as exc:
+            await mark_step(step, "failed")
+            step.status = "failed"
+            await persist(task, TaskStatus.FAILED, "worker", str(exc))
+            task.status = TaskStatus.FAILED.value
+            raise
         except Exception as exc:
             await mark_step(step, "failed")
             step.status = "failed"

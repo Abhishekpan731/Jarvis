@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     stt_provider: str = ""
     tts_provider: str = ""
 
+    # OAuth. Empty client id or secret means that provider is not configured.
+    # Tokens are refused rather than stored in plaintext when FERNET_KEY is empty.
+    fernet_key: str = ""
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Google redirects the browser here. The page then posts code and state to the API
+    # with the user's access token. The API callback itself cannot receive that redirect.
+    google_redirect_uri: str = "http://localhost:3000/"
+    api_public_url: str = "http://localhost:8000"
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.openai_api_key or self.llm_api_key)

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
+from app.integrations.requirements import missing_connection
 from app.db import get_session
 from app.jobs import IdempotencyConflict, lookup_idempotency, request_hash, store_idempotency
 from app.models import User
@@ -61,6 +62,12 @@ async def create_task(
     plan = await plan_request(model, body.instruction)
     if not plan.requires_execution:
         raise HTTPException(422, error("not_executable", "The instruction did not name a runnable agent."))
+    missing = await missing_connection(session, user.id, plan.agents)
+    if missing:
+        raise HTTPException(
+            409,
+            error("integration_required", f"Connect {missing.replace('_', ' ')} before this can run."),
+        )
 
     if plan.requires_approval:
         task_id = await create_task_from_plan(session, user.id, None, plan, enqueue=False)
@@ -191,6 +198,18 @@ async def retry_task(
     task = await _owned_task(session, user.id, task_id)
     if task["status"] != "failed":
         raise HTTPException(409, error("not_retryable", "Only a failed task can be retried."))
+    agents = (
+        await session.execute(
+            text("SELECT agent_id FROM task_steps WHERE task_id = :id"),
+            {"id": task_id},
+        )
+    ).scalars().all()
+    missing = await missing_connection(session, user.id, list(agents))
+    if missing:
+        raise HTTPException(
+            409,
+            error("integration_required", f"Connect {missing.replace('_', ' ')} before this can run."),
+        )
     from app.jobs import insert_job
 
     try:

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
 from app.db import get_session
+from app.integrations.requirements import missing_connection
 from app.models import Conversation, Device, Message, SyncEvent, User
 from app.security import error, require_user
 from app.tasks_service import create_task_from_plan
@@ -128,14 +129,16 @@ async def submit_command(
     except NotConfigured:
         model = None
     plan = await plan_request(model, command)
+    missing = await missing_connection(session, user.id, plan.agents) if plan.requires_execution else None
 
     task_id = None
-    if plan.requires_execution:
+    if plan.requires_execution and (plan.requires_approval or not missing):
+        # Approval still records a waiting task. A missing connection never queues one.
         task_id = await create_task_from_plan(
-            session, user.id, conversation.id, plan, enqueue=not plan.requires_approval
+            session, user.id, conversation.id, plan, enqueue=not plan.requires_approval and not missing
         )
 
-    reply = _reply_text(plan)
+    reply = _reply_text(plan, missing)
     session.add(
         Message(
             id=uuid.uuid4(),
@@ -163,7 +166,12 @@ async def submit_command(
     return result
 
 
-def _reply_text(plan) -> str:
+def _reply_text(plan, missing: str | None = None) -> str:
+    if missing and plan.requires_approval:
+        name = missing.replace("_", " ")
+        return f"This needs your approval, and {name} is not connected. I have not started it."
+    if missing:
+        return f"Connect {missing.replace('_', ' ')} before I can do that. I have not started it."
     if not plan.requires_execution:
         return plan.direct_answer or "I noted that. Nothing needed to be scheduled."
     agents = ", ".join(plan.agents) or "an agent"

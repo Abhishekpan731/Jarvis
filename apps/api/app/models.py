@@ -18,7 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -289,3 +289,35 @@ class SyncEvent(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+
+
+class Integration(Base):
+    """An OAuth connection. Tokens are ciphertext; this row never holds plaintext."""
+
+    __tablename__ = "integrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    scopes: Mapped[list] = mapped_column(ARRAY(Text), nullable=False)
+    account_label: Mapped[str | None] = mapped_column(Text)
+    token_ciphertext: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+    connected_at: Mapped[datetime | None] = mapped_column(_TZ)
+    revoked_at: Mapped[datetime | None] = mapped_column(_TZ)
+
+
+class OAuthState(Base):
+    """Binds an authorize redirect to the user who started it. Single use."""
+
+    __tablename__ = "oauth_states"
+
+    state: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(_TZ, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(_TZ)

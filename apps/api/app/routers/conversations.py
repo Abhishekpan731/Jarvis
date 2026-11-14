@@ -14,6 +14,7 @@ from app.ai.base import NotConfigured, ProviderError
 from app.ai.provider_factory import get_model
 from app.ai.schemas import Plan
 from app.ai.supervisor import plan_request
+from app.integrations.requirements import missing_connection
 from app.ai.usage import estimate_cost_usd
 from app.context import build_context
 from app.db import get_session, session_scope
@@ -264,6 +265,24 @@ async def _reply(
         )
     context = await build_context(session, conversation)
     plan = await plan_request(model, context[-1]["content"])
+    missing = (
+        await missing_connection(session, conversation.user_id, plan.agents)
+        if plan.requires_execution
+        else None
+    )
+    if missing and plan.requires_approval:
+        name = missing.replace("_", " ")
+        return (
+            f"This needs your approval, and {name} is not connected. I have not started it.",
+            None,
+            plan,
+        )
+    if missing:
+        return (
+            f"Connect {missing.replace('_', ' ')} before I can do that. I have not started it.",
+            None,
+            plan,
+        )
     if plan.requires_execution and plan.requires_approval:
         summary = ", ".join(step.agent for step in plan.steps)
         return (
@@ -314,7 +333,17 @@ async def _maybe_task(
 ) -> uuid.UUID | None:
     if plan is None or not plan.requires_execution:
         return None
-    return await create_task_from_plan(session, conversation.user_id, conversation.id, plan)
+    # The reply already refused this. Do not queue it behind that refusal.
+    missing = await missing_connection(session, conversation.user_id, plan.agents)
+    if missing and not plan.requires_approval:
+        return None
+    return await create_task_from_plan(
+        session,
+        conversation.user_id,
+        conversation.id,
+        plan,
+        enqueue=not plan.requires_approval and not missing,
+    )
 
 
 def _message(row: Message) -> dict:
