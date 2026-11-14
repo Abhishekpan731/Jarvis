@@ -6,8 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.ai.provider_factory import provider_status
+from app.ai.speech import speech_status
 from app.config import settings
-from app.routers import auth, conversations, memory, tasks
+from app.routers import assistant, auth, conversations, devices, memory, sync, tasks, voice
 
 if settings.app_env == "production" and len(settings.jwt_secret) < 32:
     raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
@@ -24,6 +25,10 @@ app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(memory.router)
 app.include_router(tasks.router)
+app.include_router(assistant.router)
+app.include_router(devices.router)
+app.include_router(sync.router)
+app.include_router(voice.router)
 
 
 @app.exception_handler(HTTPException)
@@ -49,4 +54,4 @@ async def validation_error(_request: Request, exc: RequestValidationError) -> JS
 
 @app.get("/api/v1/health")
 async def health() -> dict:
-    return {"status": "ok", "ai": provider_status()}
+    return {"status": "ok", "ai": provider_status(), "speech": speech_status()}

@@ -37,16 +37,21 @@ The supervisor plans a task into steps, routes each step to an agent, checks
 permissions, and combines results. First real agent behaviours: research
 (web) and personal assistant (briefing from data JARVIS actually has).
 
-## Phase 6 — Durable execution
+## Phase 6 — Durable execution (done)
 
-The worker process, Redis queue, heartbeat recovery, idempotent steps,
-cancellation, and the test that kills the worker mid-task and asserts
-completion after restart.
+The worker process claims from a PostgreSQL job table with `FOR UPDATE SKIP
+LOCKED`, holds a lease it heartbeats, and reaps expired leases on restart.
+Cancellation and idempotency keys are in place. Covered by
+`tests/test_durable_jobs.py` and `tests/test_worker_recovery.py`. The queue is
+PostgreSQL, not Redis; Redis remains available for a future rate limiter.
 
-## Phase 7 — Voice
+## Phase 7 — Voice (done, browser path)
 
-Browser speech capture, provider-abstracted transcription and synthesis,
-push-to-talk, English and Hindi, text fallback. No wake word.
+Push-to-talk in the web client, English and Hindi, text fallback when the
+browser cannot capture, and a provider boundary that reports unconfigured
+instead of inventing a transcript. No wake word. Server-side transcription and
+synthesis are not wired: no speech credential is configured. See
+`docs/architecture/VOICE.md`. Covered by `tests/test_voice.py`.
 
 ## Phase 8 — Integrations
 
@@ -76,7 +81,10 @@ recovery procedure that has been executed rather than only described.
 
 ## Explicitly deferred
 
-- Native applications of any kind. Out of scope permanently.
+- Native applications. Not built, and not installed on any device. The backend
+  command contract they would call already exists; see
+  `docs/architecture/ASSISTANTS.md`. Building the iOS or Android app needs
+  explicit approval because it means installing software on a personal device.
 - Wake-word activation. Impossible under the zero-install constraint.
 - Local Mac or iOS control. Impossible under the zero-install constraint.
 - Autonomous financial transactions. HIGH risk, and not in scope even then

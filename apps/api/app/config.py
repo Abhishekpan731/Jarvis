@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
 
+    # Optional server-side speech. Empty means the browser captures and speaks,
+    # and the API reports speech as not configured rather than inventing audio.
+    stt_provider: str = ""
+    tts_provider: str = ""
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.openai_api_key or self.llm_api_key)

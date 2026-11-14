@@ -7,7 +7,17 @@ it is what the database actually does.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -252,3 +262,30 @@ class AuditLog(Base):
     target_id: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB)
     created_at: Mapped[datetime] = mapped_column(_TZ, server_default=func.now())
+
+
+class Device(Base):
+    """A registered client. A device id is not a credential."""
+
+    __tablename__ = "devices"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+    last_seen_at: Mapped[datetime | None] = mapped_column(_TZ)
+    revoked_at: Mapped[datetime | None] = mapped_column(_TZ)
+
+
+class SyncEvent(Base):
+    """Append-only per-user event log. Clients replay from the last id seen."""
+
+    __tablename__ = "sync_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("devices.id"))
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())

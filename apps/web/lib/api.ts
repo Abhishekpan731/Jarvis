@@ -14,6 +14,36 @@ export type ChatMessage = {
   content: string;
   created_at: string;
 };
+export type SpeechStatus = {
+  stt_configured: boolean;
+  tts_configured: boolean;
+  locales: string[];
+  browser_capture: boolean;
+};
+export type VoiceSession = SpeechStatus & {
+  locale: string;
+  language: string;
+  push_to_talk: boolean;
+  wake_word: boolean;
+  text_fallback: boolean;
+};
+export type SpeakResult = {
+  locale: string;
+  language: string;
+  text: string;
+  truncated: boolean;
+  audio: null;
+};
+export type CommandResult = {
+  request_id: string;
+  conversation_id: string;
+  task_id: string | null;
+  status: string;
+  response_text: string;
+  voice_response: string;
+  requires_approval: boolean;
+  source: string;
+};
 
 export class ApiError extends Error {
   constructor(
@@ -26,7 +56,9 @@ export class ApiError extends Error {
 }
 
 function token(): string | null {
-  return typeof window === "undefined" ? null : sessionStorage.getItem("jarvis_access");
+  return typeof window === "undefined"
+    ? null
+    : sessionStorage.getItem("jarvis_access");
 }
 
 export function saveToken(value: string): void {
@@ -42,10 +74,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   headers.set("Content-Type", "application/json");
   const access = token();
   if (access) headers.set("Authorization", `Bearer ${access}`);
-  const response = await fetch(`${BASE}${path}`, { ...init, headers, credentials: "include" });
+  const response = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body.error?.code ?? "error", body.error?.message ?? response.statusText);
+    throw new ApiError(
+      response.status,
+      body.error?.code ?? "error",
+      body.error?.message ?? response.statusText,
+    );
   }
   return response.json();
 }
@@ -62,19 +102,54 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   session: () => request<{ user: User }>("/api/v1/auth/session"),
-  logout: () => request<{ signed_out: boolean }>("/api/v1/auth/logout", { method: "POST" }),
-  health: () => request<{ status: string; ai: { configured: boolean; model: string | null } }>("/api/v1/health"),
-  conversations: () => request<{ conversations: Conversation[] }>("/api/v1/conversations"),
+  logout: () =>
+    request<{ signed_out: boolean }>("/api/v1/auth/logout", { method: "POST" }),
+  health: () =>
+    request<{
+      status: string;
+      ai: { configured: boolean; model: string | null };
+      speech: SpeechStatus;
+    }>("/api/v1/health"),
+  voiceSession: (locale: string) =>
+    request<VoiceSession>(
+      `/api/v1/voice/session?locale=${encodeURIComponent(locale)}`,
+    ),
+  speak: (text: string, locale: string) =>
+    request<SpeakResult>("/api/v1/voice/speak", {
+      method: "POST",
+      body: JSON.stringify({ text, locale }),
+    }),
+  command: (command: string, locale: string, conversationId: string) =>
+    request<CommandResult>("/api/v1/assistant/commands", {
+      method: "POST",
+      body: JSON.stringify({
+        command,
+        source: "web",
+        input_type: "voice",
+        locale,
+        conversation_id: conversationId,
+      }),
+    }),
+  conversations: () =>
+    request<{ conversations: Conversation[] }>("/api/v1/conversations"),
   createConversation: () =>
-    request<Conversation>("/api/v1/conversations", { method: "POST", body: JSON.stringify({}) }),
+    request<Conversation>("/api/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   renameConversation: (id: string, title: string) =>
     request<Conversation>(`/api/v1/conversations/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
   deleteConversation: (id: string) =>
-    request<{ deleted: boolean }>(`/api/v1/conversations/${id}`, { method: "DELETE" }),
-  messages: (id: string) => request<{ messages: ChatMessage[] }>(`/api/v1/conversations/${id}/messages`),
+    request<{ deleted: boolean }>(`/api/v1/conversations/${id}`, {
+      method: "DELETE",
+    }),
+  messages: (id: string) =>
+    request<{ messages: ChatMessage[] }>(
+      `/api/v1/conversations/${id}/messages`,
+    ),
 };
 
 export async function streamMessage(
@@ -86,15 +161,22 @@ export async function streamMessage(
   const headers = new Headers({ "Content-Type": "application/json" });
   const access = token();
   if (access) headers.set("Authorization", `Bearer ${access}`);
-  const response = await fetch(`${BASE}/api/v1/conversations/${conversationId}/stream`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ content }),
-    signal,
-  });
+  const response = await fetch(
+    `${BASE}/api/v1/conversations/${conversationId}/stream`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content }),
+      signal,
+    },
+  );
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, body.error?.code ?? "error", body.error?.message ?? "Request failed.");
+    throw new ApiError(
+      response.status,
+      body.error?.code ?? "error",
+      body.error?.message ?? "Request failed.",
+    );
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -106,8 +188,12 @@ export async function streamMessage(
     const chunks = buffer.split("\n\n");
     buffer = chunks.pop() ?? "";
     for (const chunk of chunks) {
-      const eventLine = chunk.split("\n").find((line) => line.startsWith("event: "));
-      const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
+      const eventLine = chunk
+        .split("\n")
+        .find((line) => line.startsWith("event: "));
+      const dataLine = chunk
+        .split("\n")
+        .find((line) => line.startsWith("data: "));
       if (!dataLine || !eventLine) continue;
       const event = eventLine.slice(7);
       const data = JSON.parse(dataLine.slice(6));
