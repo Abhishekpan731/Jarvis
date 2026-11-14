@@ -5,6 +5,8 @@ import {
     ChatMessage,
     Conversation,
     IntegrationItem,
+    Notice,
+    Reminder,
     User,
     api,
     clearToken,
@@ -144,7 +146,12 @@ function Workspace({
   const [error, setError] = useState("");
   const [locale, setLocale] = useState("en");
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
+  const [notes, setNotes] = useState<Notice[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [reminderName, setReminderName] = useState("");
   const [notice, setNotice] = useState("");
   const [listening, setListening] = useState(false);
   const [canCapture, setCanCapture] = useState(false);
@@ -161,6 +168,13 @@ function Workspace({
       .health()
       .then((res) => setAiConfigured(res.ai.configured))
       .catch(() => setAiConfigured(false));
+    api
+      .notifications()
+      .then((res) => {
+        setNotes(res.notifications);
+        setUnread(res.unread);
+      })
+      .catch(() => undefined);
     setCanCapture(captureAvailable());
   }, []);
 
@@ -181,6 +195,74 @@ function Workspace({
     if (!saved.code && !saved.state && !saved.error) return;
     void finishRedirect(saved.code ?? "", saved.state ?? "", saved.error ?? "");
   }, []);
+
+  async function loadNotes() {
+    try {
+      const [listed, saved] = await Promise.all([
+        api.notifications(),
+        api.reminders(),
+      ]);
+      setNotes(listed.notifications);
+      setUnread(listed.unread);
+      setReminders(saved.reminders);
+      showGranted(listed.notifications);
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Could not load notices.",
+      );
+    }
+  }
+
+  async function markRead(id: string) {
+    await api.readNotification(id).catch(() => undefined);
+    await loadNotes();
+  }
+
+  async function addReminder(event: FormEvent) {
+    event.preventDefault();
+    const name = reminderName.trim();
+    if (!name) return;
+    setReminderName("");
+    try {
+      await api.createReminder(name, name, 8, 0);
+      await loadNotes();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Could not save the reminder.",
+      );
+    }
+  }
+
+  function showGranted(items: Notice[]) {
+    if (
+      typeof Notification === "undefined" ||
+      Notification.permission !== "granted"
+    )
+      return;
+    for (const item of items.filter((note) => !note.read).slice(0, 3)) {
+      if (sessionStorage.getItem(`jarvis_note_${item.id}`)) continue;
+      sessionStorage.setItem(`jarvis_note_${item.id}`, "1");
+      new Notification(item.title, { body: item.body });
+    }
+  }
+
+  function askBrowser() {
+    if (typeof Notification === "undefined") {
+      setNotice("This browser has no notification permission to grant.");
+      return;
+    }
+    void Notification.requestPermission().then((result) => {
+      setNotice(
+        result === "granted"
+          ? "Browser notifications are allowed. JARVIS still does not push to a device."
+          : "Browser notifications stay off.",
+      );
+    });
+  }
+
+  useEffect(() => {
+    showGranted(notes);
+  }, [notes]);
 
   async function loadIntegrations() {
     try {
@@ -418,7 +500,18 @@ function Workspace({
           <button
             className="mt-2 block text-neutral-300"
             onClick={() => {
+              setNotesOpen((open) => !open);
+              setConnectionsOpen(false);
+              void loadNotes();
+            }}
+          >
+            Notices{unread > 0 ? ` (${unread})` : ""}
+          </button>
+          <button
+            className="mt-2 block text-neutral-300"
+            onClick={() => {
               setConnectionsOpen(true);
+              setNotesOpen(false);
               void loadIntegrations();
             }}
           >
@@ -462,6 +555,75 @@ function Workspace({
         </div>
         {notice && <p className="px-4 text-sm text-emerald-300">{notice}</p>}
         {error && <p className="px-4 text-sm text-red-300">{error}</p>}
+        {notesOpen && (
+          <section className="border-t border-white/10 px-4 py-3 text-sm">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-neutral-300">Notices</p>
+              <button
+                type="button"
+                className="text-neutral-500"
+                onClick={askBrowser}
+              >
+                Browser permission
+              </button>
+            </div>
+            <ul className="space-y-2">
+              {notes.length === 0 && (
+                <li className="text-neutral-500">
+                  Nothing waiting. Email is not configured.
+                </li>
+              )}
+              {notes.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex items-start justify-between gap-3"
+                >
+                  <span>
+                    {item.title}
+                    <span className="mt-1 block text-neutral-500">
+                      {item.body}
+                    </span>
+                  </span>
+                  {!item.read && (
+                    <button
+                      type="button"
+                      onClick={() => void markRead(item.id)}
+                    >
+                      Read
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <form onSubmit={addReminder} className="mt-3 flex gap-2">
+              <input
+                className="flex-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2"
+                placeholder="Daily reminder, delivered in the app at 08:00 UTC"
+                value={reminderName}
+                onChange={(e) => setReminderName(e.target.value)}
+              />
+              <button className="rounded-lg bg-white/10 px-3">Save</button>
+            </form>
+            <ul className="mt-2 space-y-1 text-neutral-500">
+              {reminders.map((item) => (
+                <li key={item.id} className="flex justify-between">
+                  <span>
+                    {item.name} at {String(item.hour).padStart(2, "0")}:
+                    {String(item.minute).padStart(2, "0")} {item.timezone}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void api.deleteReminder(item.id).then(loadNotes)
+                    }
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {connectionsOpen && (
           <section className="border-t border-white/10 px-4 py-3 text-sm">
             <div className="mb-2 flex items-center justify-between">

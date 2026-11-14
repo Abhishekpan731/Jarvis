@@ -321,3 +321,37 @@ class OAuthState(Base):
     created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(_TZ, nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(_TZ)
+
+
+class Notification(Base):
+    """A message the user pulls. No row here means no delivery was claimed."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False, server_default="in_app")
+    dedupe_key: Mapped[str | None] = mapped_column(Text)
+    read_at: Mapped[datetime | None] = mapped_column(_TZ)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+
+
+class Automation(Base):
+    """A daily schedule. hour and minute are local to timezone. No cron string."""
+
+    __tablename__ = "automations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    minute: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    last_slot: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())

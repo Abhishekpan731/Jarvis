@@ -46,6 +46,24 @@ export type IntegrationItem = {
     connected_at: string | null;
   } | null;
 };
+export type Notice = {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  channel: string;
+  read: boolean;
+  created_at: string;
+};
+export type Reminder = {
+  id: string;
+  name: string;
+  body: string;
+  hour: number;
+  minute: number;
+  timezone: string;
+  enabled: boolean;
+};
 export type CommandResult = {
   request_id: string;
   conversation_id: string;
@@ -179,6 +197,25 @@ export const api = {
     ),
   disconnectIntegration: (provider: string) =>
     request<{ disconnected: boolean }>(`/api/v1/integrations/${provider}`, {
+      method: "DELETE",
+    }),
+  notifications: () =>
+    request<{ notifications: Notice[]; unread: number }>(
+      "/api/v1/notifications",
+    ),
+  readNotification: (id: string) =>
+    request<{ read: boolean }>(`/api/v1/notifications/${id}/read`, {
+      method: "POST",
+    }),
+  reminders: () =>
+    request<{ reminders: Reminder[] }>("/api/v1/notifications/reminders"),
+  createReminder: (name: string, body: string, hour: number, minute: number) =>
+    request<Reminder>("/api/v1/notifications/reminders", {
+      method: "POST",
+      body: JSON.stringify({ name, body, hour, minute, timezone: "UTC" }),
+    }),
+  deleteReminder: (id: string) =>
+    request<{ deleted: boolean }>(`/api/v1/notifications/reminders/${id}`, {
       method: "DELETE",
     }),
 };

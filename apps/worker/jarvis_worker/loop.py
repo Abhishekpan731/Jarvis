@@ -11,6 +11,7 @@ import socket
 import uuid
 from datetime import UTC, datetime
 
+from app.briefing import run_due
 from app.config import settings
 from app.db import session_scope
 from app.execution import LeaseLost, execute_task_durable
@@ -55,6 +56,12 @@ class Runner:
                 async with session_scope() as session:
                     await reap_expired(session)
                     await promote_retry_wait(session)
+                    try:
+                        await run_due(session)
+                        await session.commit()
+                    except Exception:
+                        await session.rollback()
+                        _log("briefing_failed", worker_id=self.worker, error_code="briefing_failed")
                 self.ready = True
                 free = settings.worker_concurrency - self.inflight
                 claimed = False

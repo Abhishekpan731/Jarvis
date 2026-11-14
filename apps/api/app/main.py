@@ -8,7 +8,18 @@ from fastapi.responses import JSONResponse
 from app.ai.provider_factory import provider_status
 from app.ai.speech import speech_status
 from app.config import settings
-from app.routers import assistant, auth, conversations, devices, integrations, memory, sync, tasks, voice
+from app.routers import (
+    assistant,
+    auth,
+    conversations,
+    devices,
+    integrations,
+    memory,
+    notifications,
+    sync,
+    tasks,
+    voice,
+)
 
 if settings.app_env == "production" and len(settings.jwt_secret) < 32:
     raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
@@ -30,6 +41,7 @@ app.include_router(devices.router)
 app.include_router(sync.router)
 app.include_router(voice.router)
 app.include_router(integrations.router)
+app.include_router(notifications.router)
 
 
 @app.exception_handler(HTTPException)

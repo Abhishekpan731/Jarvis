@@ -62,10 +62,15 @@ string. A command that needs a missing connection is not queued, and a worker
 does not invent a mailbox or calendar read. No client id is configured, so this
 is not device-tested. Covered by `tests/test_integrations.py`.
 
-## Phase 9 — Notifications and automations
+## Phase 9 — Notifications and automations (done, in-app only)
 
-In-app notifications, browser notifications where permission is granted, email
-as the guaranteed channel, scheduled briefing, user-defined automations.
+A signed-in user pulls notification rows. The worker writes a daily briefing
+from that user's open tasks, and a daily reminder the user wrote, once per
+local day. The web client can show an unread row with the browser Notification
+API after the user grants permission. It does not push to a device, and it does
+not send email: no mail credential is configured, and the API reports
+`email_configured: false`. Covered by `tests/test_notifications.py`. Not
+device-tested.
 
 ## Phase 10 — Security hardening
 
