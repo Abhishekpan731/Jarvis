@@ -6,6 +6,7 @@ import json
 
 from app.config import settings
 from app.db import session_scope
+from app.observe import queue_depth
 from sqlalchemy import text
 
 
@@ -16,17 +17,22 @@ async def start_health(runner):
         try:
             await reader.read(1024)
             database = "error"
+            depth = None
             try:
                 async with session_scope() as session:
                     await session.execute(text("SELECT 1"))
+                    depth = await queue_depth(session)
                 database = "ok"
             except Exception:
                 database = "error"
+                depth = None
             body = json.dumps(
                 {
                     "process": "ok",
                     "database": database,
                     "ready_to_claim": database == "ok" and not runner.shutdown.is_set(),
+                    "inflight": runner.inflight,
+                    "queue": depth,
                 }
             ).encode()
             head = (

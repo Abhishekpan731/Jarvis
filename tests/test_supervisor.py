@@ -39,14 +39,16 @@ def test_high_risk_actions_require_approval():
 
 @pytest.mark.asyncio
 async def test_without_a_provider_a_plain_question_creates_no_task():
-    plan = await plan_request(None, "What is the capital of France?")
+    plan, usage = await plan_request(None, "What is the capital of France?")
+    assert usage is None
     assert plan.requires_execution is False
     assert plan.steps == []
 
 
 @pytest.mark.asyncio
 async def test_without_a_provider_a_named_agent_becomes_a_plan():
-    plan = await plan_request(None, "ask the research agent to compare these two libraries")
+    plan, usage = await plan_request(None, "ask the research agent to compare these two libraries")
+    assert usage is None
     assert plan.requires_execution is True
     assert plan.agents == ["research"]
     assert plan.requires_approval is False

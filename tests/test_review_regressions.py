@@ -186,5 +186,6 @@ async def test_oversized_input_is_rejected(client):
 async def test_missing_provider_raises_rather_than_returning_text():
     with pytest.raises(NotConfigured):
         get_model()
-    plan = await plan_request(None, "hello")
+    plan, usage = await plan_request(None, "hello")
+    assert usage is None
     assert plan.direct_answer is None

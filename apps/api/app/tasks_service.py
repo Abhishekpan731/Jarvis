@@ -23,10 +23,12 @@ async def create_task_from_plan(
     plan: Plan,
     *,
     enqueue: bool = True,
+    commit: bool = True,
 ) -> uuid.UUID:
     """Persist a task, its steps, and (unless approval is required) one job.
 
-    Commits before returning. Does not execute the task.
+    Commits before returning unless the caller still has rows to attach.
+    Does not execute the task.
     """
     now = datetime.now(UTC)
     waiting = plan.requires_approval
@@ -67,7 +69,8 @@ async def create_task_from_plan(
     await session.flush()
     if enqueue and not waiting:
         await insert_job(session, user_id=user_id, task_id=task.id)
-    await session.commit()
+    if commit:
+        await session.commit()
     return task.id
 
 

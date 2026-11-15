@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
+from app.observe import record_usage
 from app.db import get_session
 from app.integrations.requirements import missing_connection
 from app.limits import limit_writes
@@ -130,15 +131,33 @@ async def submit_command(
         model = get_model()
     except NotConfigured:
         model = None
-    plan = await plan_request(model, command)
+    plan, usage = await plan_request(model, command)
+    usage_row = None
+    if usage is not None and model is not None:
+        usage_row = await record_usage(
+            session,
+            user_id=user.id,
+            task_id=None,
+            provider=model.name,
+            model=model.model,
+            usage=usage,
+        )
     missing = await missing_connection(session, user.id, plan.agents) if plan.requires_execution else None
 
     task_id = None
     if plan.requires_execution and (plan.requires_approval or not missing):
         # Approval still records a waiting task. A missing connection never queues one.
+        # The caller commits, so the token count can name this task in the same write.
         task_id = await create_task_from_plan(
-            session, user.id, conversation.id, plan, enqueue=not plan.requires_approval and not missing
+            session,
+            user.id,
+            conversation.id,
+            plan,
+            enqueue=not plan.requires_approval and not missing,
+            commit=False,
         )
+        if usage_row is not None:
+            usage_row.task_id = task_id
 
     reply = _reply_text(plan, missing)
     session.add(

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
+from app.observe import record_usage
 from app.integrations.requirements import missing_connection
 from app.db import get_session
 from app.jobs import IdempotencyConflict, lookup_idempotency, request_hash, store_idempotency
@@ -61,7 +62,17 @@ async def create_task(
         model = get_model()
     except NotConfigured:
         model = None
-    plan = await plan_request(model, body.instruction)
+    plan, usage = await plan_request(model, body.instruction)
+    usage_row = None
+    if usage is not None and model is not None:
+        usage_row = await record_usage(
+            session,
+            user_id=user.id,
+            task_id=None,
+            provider=model.name,
+            model=model.model,
+            usage=usage,
+        )
     if not plan.requires_execution:
         raise HTTPException(422, error("not_executable", "The instruction did not name a runnable agent."))
     missing = await missing_connection(session, user.id, plan.agents)
@@ -72,12 +83,22 @@ async def create_task(
         )
 
     if plan.requires_approval:
-        task_id = await create_task_from_plan(session, user.id, None, plan, enqueue=False)
+        task_id = await create_task_from_plan(
+            session, user.id, None, plan, enqueue=False, commit=usage_row is None
+        )
+        if usage_row is not None:
+            usage_row.task_id = task_id
+            await session.commit()
         if idempotency_key:
             await _save_key(session, user.id, idempotency_key, digest, task_id)
         return await _task_body(session, user.id, task_id, status_code=202)
 
-    task_id = await create_task_from_plan(session, user.id, None, plan, enqueue=True)
+    task_id = await create_task_from_plan(
+        session, user.id, None, plan, enqueue=True, commit=usage_row is None
+    )
+    if usage_row is not None:
+        usage_row.task_id = task_id
+        await session.commit()
     if body.priority:
         await session.execute(
             text(

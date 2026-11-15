@@ -13,7 +13,7 @@ from jarvis_shared.agents import AGENTS, action_allowed, get_agent
 
 from app.ai.base import LanguageModel
 from app.ai.prompts import PLANNER
-from app.ai.schemas import Plan, PlanStep
+from app.ai.schemas import Plan, PlanStep, Usage
 from app.ai.untrusted import quote
 
 _AGENT_IDS = tuple(agent.id for agent in AGENTS)
@@ -81,9 +81,13 @@ def validate_plan(plan: Plan) -> Plan:
     )
 
 
-async def plan_request(model: LanguageModel | None, message: str) -> Plan:
+async def plan_request(model: LanguageModel | None, message: str) -> tuple[Plan, Usage | None]:
+    """Return the validated plan and the token count of the model call.
+
+    The count is None when no model ran. The message is not returned.
+    """
     if model is None:
-        return validate_plan(_fallback(message))
+        return validate_plan(_fallback(message)), None
     messages = [
         {"role": "system", "content": PLANNER},
         {"role": "system", "content": "Available agents: " + ", ".join(_AGENT_IDS)},
@@ -93,5 +97,5 @@ async def plan_request(model: LanguageModel | None, message: str) -> Plan:
     try:
         parsed = Plan.model_validate(json.loads(completion.text))
     except (json.JSONDecodeError, ValueError):
-        return validate_plan(_fallback(message))
-    return validate_plan(parsed)
+        return validate_plan(_fallback(message)), completion.usage
+    return validate_plan(parsed), completion.usage

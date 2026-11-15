@@ -16,9 +16,10 @@ from app.ai.schemas import Plan
 from app.ai.supervisor import plan_request
 from app.integrations.requirements import missing_connection
 from app.ai.usage import estimate_cost_usd
+from app.observe import record_usage
 from app.context import build_context
 from app.db import get_session, session_scope
-from app.models import Conversation, Message, User
+from app.models import Conversation, Message, ModelUsage, User
 from app.security import error, require_user
 from app.tasks_service import create_task_from_plan
 
@@ -183,12 +184,13 @@ async def add_message(
     await session.commit()
 
     try:
-        reply, usage, plan = await _reply(session, row)
+        reply, usage, plan, usage_row = await _reply(session, row)
     except HTTPException as exc:
+        await session.commit()
         await _save_reply(row, _failure_note(exc), None)
         raise
     saved = await _save_reply(row, reply, usage)
-    task_id = await _maybe_task(session, row, plan)
+    task_id = await _maybe_task(session, row, plan, usage_row)
     return _message(saved) | {"task_id": str(task_id) if task_id else None}
 
 
@@ -256,7 +258,7 @@ def _failure_note(exc: HTTPException) -> str:
 
 async def _reply(
     session: AsyncSession, conversation: Conversation
-) -> tuple[str, dict | None, Plan]:
+) -> tuple[str, dict | None, Plan, ModelUsage | None]:
     try:
         model = get_model()
     except NotConfigured:
@@ -264,7 +266,17 @@ async def _reply(
             503, error("ai_not_configured", "No model provider is configured. Set OPENAI_API_KEY.")
         )
     context = await build_context(session, conversation)
-    plan = await plan_request(model, context[-1]["content"])
+    plan, plan_usage = await plan_request(model, context[-1]["content"])
+    usage_row = None
+    if plan_usage is not None:
+        usage_row = await record_usage(
+            session,
+            user_id=conversation.user_id,
+            task_id=None,
+            provider=model.name,
+            model=model.model,
+            usage=plan_usage,
+        )
     missing = (
         await missing_connection(session, conversation.user_id, plan.agents)
         if plan.requires_execution
@@ -276,12 +288,14 @@ async def _reply(
             f"This needs your approval, and {name} is not connected. I have not started it.",
             None,
             plan,
+            usage_row,
         )
     if missing:
         return (
             f"Connect {missing.replace('_', ' ')} before I can do that. I have not started it.",
             None,
             plan,
+            usage_row,
         )
     if plan.requires_execution and plan.requires_approval:
         summary = ", ".join(step.agent for step in plan.steps)
@@ -289,11 +303,20 @@ async def _reply(
             f"This plan needs approval before it can run ({summary}). I have not started it.",
             None,
             plan,
+            usage_row,
         )
     if plan.requires_execution:
         summary = ", ".join(step.agent for step in plan.steps)
-        return f"I queued a plan using {summary}.", None, plan
+        return f"I queued a plan using {summary}.", None, plan, usage_row
     completion = await model.complete(context)
+    await record_usage(
+        session,
+        user_id=conversation.user_id,
+        task_id=None,
+        provider=completion.provider,
+        model=completion.model,
+        usage=completion.usage,
+    )
     usage = {
         "input_tokens": completion.usage.input_tokens,
         "output_tokens": completion.usage.output_tokens,
@@ -301,7 +324,7 @@ async def _reply(
             completion.model, completion.usage.input_tokens, completion.usage.output_tokens
         ),
     }
-    return completion.text, usage, plan
+    return completion.text, usage, plan, usage_row
 
 
 async def _save_reply(
@@ -329,21 +352,33 @@ async def _save_reply(
 
 
 async def _maybe_task(
-    session: AsyncSession, conversation: Conversation, plan: Plan
+    session: AsyncSession,
+    conversation: Conversation,
+    plan: Plan,
+    usage_row: ModelUsage | None = None,
 ) -> uuid.UUID | None:
     if plan is None or not plan.requires_execution:
+        if usage_row is not None:
+            await session.commit()
         return None
     # The reply already refused this. Do not queue it behind that refusal.
     missing = await missing_connection(session, conversation.user_id, plan.agents)
     if missing and not plan.requires_approval:
+        if usage_row is not None:
+            await session.commit()
         return None
-    return await create_task_from_plan(
+    task_id = await create_task_from_plan(
         session,
         conversation.user_id,
         conversation.id,
         plan,
         enqueue=not plan.requires_approval and not missing,
+        commit=usage_row is None,
     )
+    if usage_row is not None:
+        usage_row.task_id = task_id
+        await session.commit()
+    return task_id
 
 
 def _message(row: Message) -> dict:

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     google_redirect_uri: str = "http://localhost:3000/"
     api_public_url: str = "http://localhost:8000"
 
+    # Operator view. Empty means the admin route is closed. A user JWT is not enough.
+    admin_token: str = ""
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.openai_api_key or self.llm_api_key)

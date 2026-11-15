@@ -77,6 +77,20 @@ def refresh_cookie(token: str) -> dict:
     }
 
 
+async def require_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> None:
+    """Operator gate. A user access token does not open this.
+
+    The token is compared in constant time. An empty configuration refuses
+    every request, including one that sends a blank bearer value.
+    """
+    configured = settings.admin_token
+    presented = credentials.credentials if credentials is not None else ""
+    if not configured or not secrets.compare_digest(presented, configured):
+        raise HTTPException(401, error("unauthenticated", "Operator sign-in required."))
+
+
 async def require_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_session),

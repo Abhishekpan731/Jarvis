@@ -9,6 +9,7 @@ from app.ai.provider_factory import provider_status
 from app.ai.speech import speech_status
 from app.config import settings
 from app.routers import (
+    admin,
     assistant,
     auth,
     conversations,
@@ -59,6 +60,7 @@ app.include_router(sync.router)
 app.include_router(voice.router)
 app.include_router(integrations.router)
 app.include_router(notifications.router)
+app.include_router(admin.router)
 
 
 @app.exception_handler(HTTPException)

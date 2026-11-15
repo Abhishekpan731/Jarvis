@@ -92,8 +92,14 @@ Implemented and tested in `tests/test_security.py`.
 
 ## Phase 11 — Observability
 
-OpenTelemetry traces, per-task token and cost accounting, queue depth, worker
-health, an admin view that shows none of the user's content.
+Token counts and an estimated cost are stored in `model_usage`. The row has no
+prompt and no reply. `/api/v1/admin/overview` returns queue depth and those
+sums. It is closed unless `ADMIN_TOKEN` is set, and a user JWT does not open
+it. The worker health check on `127.0.0.1` adds queue depth and in-flight
+jobs. Neither response includes message text.
+
+Not done: an OpenTelemetry exporter. That needs a new package, which has not
+been added. A trace today is one log line with ids and counts.
 
 ## Phase 12 — Production deployment
 

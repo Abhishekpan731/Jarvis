@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Integer,
+    Numeric,
     Text,
     UniqueConstraint,
 )
@@ -187,6 +188,25 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(_TZ)
     completed_at: Mapped[datetime | None] = mapped_column(_TZ)
+
+
+class ModelUsage(Base):
+    """Token counts for one model call. No prompt and no reply."""
+
+    __tablename__ = "model_usage"
+    __table_args__ = (
+        CheckConstraint("input_tokens >= 0 AND output_tokens >= 0", name="usage_tokens_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id"))
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    created_at: Mapped[datetime] = mapped_column(_TZ, nullable=False, server_default=func.now())
 
 
 class IdempotencyKey(Base):
