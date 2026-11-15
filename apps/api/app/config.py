@@ -9,7 +9,13 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
-    database_url: str = "postgresql+asyncpg://jarvis:jarvis@localhost:5433/jarvis"
+    # Runtime connection. Must be the non-owner `jarvis_app` role so Postgres
+    # RLS is actually evaluated (table owners bypass RLS unless FORCED, but a
+    # non-owner role is subject to it regardless). Migrations run separately
+    # as the owner role `jarvis` via DATABASE_URL_SYNC / alembic.ini.
+    database_url: str = (
+        "postgresql+asyncpg://jarvis_app:change-me-app@localhost:5433/jarvis"
+    )
     redis_url: str = "redis://localhost:6380/0"
 
     jwt_secret: str = "dev-only-secret-change-me-not-for-production"

@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from app.config import settings
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc
 from app.integrations.crypto import open_tokens, seal
 from cryptography.fernet import Fernet
 from sqlalchemy import text
@@ -26,6 +26,12 @@ async def _register(client, name: str) -> dict:
     )
     assert response.status_code == 201, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+async def _user_id(client, headers: dict) -> uuid.UUID:
+    me = await client.get("/api/v1/auth/session", headers=headers)
+    assert me.status_code == 200, me.text
+    return uuid.UUID(me.json()["user"]["id"])
 
 
 @pytest.fixture
@@ -93,7 +99,9 @@ async def test_callback_stores_ciphertext_and_blocks_other_users(client, google_
     assert gmail["connection"]["connected"] is True
     assert "ya29-secret" not in listed.text
 
+    owner_id = await _user_id(client, owner)
     async with session_scope() as session:
+        await set_tenant_guc(session, owner_id)
         row = (
             await session.execute(
                 text(
@@ -166,10 +174,18 @@ async def test_disconnect_deletes_ciphertext(client, google_ready):
     started = await client.post("/api/v1/integrations/google_calendar/connect", headers=headers)
     assert started.status_code == 200
     ciphertext = seal({"access_token": "temp"})
+    user_id = (
+        await _user_id(client, headers)
+    )
     async with session_scope() as session:
-        user_id = (
-            await session.execute(text("select user_id from oauth_states order by created_at desc limit 1"))
+        await set_tenant_guc(session, user_id)
+        found = (
+            await session.execute(
+                text("select user_id from oauth_states where user_id = :id order by created_at desc limit 1"),
+                {"id": user_id},
+            )
         ).scalar_one()
+        assert found == user_id
         await session.execute(
             text(
                 """
@@ -184,6 +200,7 @@ async def test_disconnect_deletes_ciphertext(client, google_ready):
     gone = await client.delete("/api/v1/integrations/google_calendar", headers=headers)
     assert gone.status_code == 200, gone.text
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         row = (
             await session.execute(
                 text("select status, token_ciphertext from integrations where user_id = :id"),

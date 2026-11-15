@@ -6,7 +6,7 @@ import pytest
 
 from app.ai.schemas import Usage
 from app.config import settings
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc, set_worker_guc
 from app.models import Conversation, Message, User
 from app.observe import queue_depth, record_usage, usage_totals
 from app.security import hash_password
@@ -45,6 +45,7 @@ async def test_admin_view_returns_counts_and_no_message_text(client, monkeypatch
         )
         session.add(user)
         await session.flush()
+        await set_tenant_guc(session, user.id)
         conversation = Conversation(id=uuid.uuid4(), user_id=user.id, title="private")
         session.add(conversation)
         await session.flush()
@@ -67,6 +68,7 @@ async def test_admin_view_returns_counts_and_no_message_text(client, monkeypatch
             usage=Usage(input_tokens=10, output_tokens=4),
         )
         await session.commit()
+        await set_worker_guc(session)
         totals = await usage_totals(session)
         depth = await queue_depth(session)
 

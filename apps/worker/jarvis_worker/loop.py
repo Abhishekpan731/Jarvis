@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 from app.briefing import run_due
 from app.config import settings
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc, set_worker_guc
 from app.execution import LeaseLost, execute_task_durable
 from app.integrations.runner import IntegrationStepError, run_step
 from app.jobs import (
@@ -58,6 +58,7 @@ class Runner:
                     await reap_expired(session)
                     await promote_retry_wait(session)
                     try:
+                        await set_worker_guc(session)
                         await run_due(session)
                         await session.commit()
                     except Exception:
@@ -112,7 +113,7 @@ class Runner:
         _log("job_claimed", worker_id=self.worker, job_id=str(job_id), task_id=str(task_id))
         heartbeat_task = asyncio.create_task(self._beat(job_id, token))
         try:
-            task, steps = await self._load(task_id)
+            task, steps = await self._load(task_id, user_id)
             await execute_task_durable(
                 task,
                 steps,
@@ -164,6 +165,7 @@ class Runner:
         if self.shutdown.is_set():
             return
         async with session_scope() as session:
+            await set_worker_guc(session)
             task_id = (
                 await session.execute(
                     text("SELECT task_id FROM jobs WHERE id = :id"),
@@ -178,6 +180,7 @@ class Runner:
 
     async def _owns(self, job_id, token) -> bool:
         async with session_scope() as session:
+            await set_worker_guc(session)
             row = (
                 await session.execute(
                     text(
@@ -192,8 +195,10 @@ class Runner:
             ).one_or_none()
             return row is not None
 
-    async def _load(self, task_id) -> tuple[Task, list[TaskStep]]:
+    async def _load(self, task_id, user_id) -> tuple[Task, list[TaskStep]]:
         async with session_scope() as session:
+            await set_worker_guc(session)
+            await set_tenant_guc(session, user_id)
             task = await session.get(Task, task_id)
             steps = (
                 await session.execute(
@@ -213,6 +218,8 @@ class Runner:
 
     async def _persist(self, job_id, token, user_id, task, target, actor, reason) -> None:
         async with session_scope() as session:
+            await set_worker_guc(session)
+            await set_tenant_guc(session, user_id)
             updated = await session.execute(
                 text(
                     """
@@ -269,6 +276,8 @@ class Runner:
 
     async def _mark(self, job_id, token, user_id, step, status: str) -> None:
         async with session_scope() as session:
+            await set_worker_guc(session)
+            await set_tenant_guc(session, user_id)
             updated = await session.execute(
                 text(
                     """

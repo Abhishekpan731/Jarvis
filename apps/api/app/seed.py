@@ -112,10 +112,11 @@ async def run_demo_tasks(session: AsyncSession, user: User) -> None:
 
 
 async def _main() -> None:
-    from app.db import session_scope
+    from app.db import session_scope, set_tenant_guc
 
     async with session_scope() as session:
         user = (await session.execute(select(User).limit(1))).scalar_one()
+        await set_tenant_guc(session, user.id)
         await run_demo_tasks(session, user)
 
 

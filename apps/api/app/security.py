@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db import get_session
+from app.db import get_session, set_tenant_guc
 from app.models import Session, User
 
 _hasher = PasswordHasher()
@@ -110,6 +110,7 @@ async def require_user(
     user = await session.get(User, user_id)
     if user is None or user.deleted_at is not None:
         raise HTTPException(401, error("unauthenticated", "Sign in to continue."))
+    await set_tenant_guc(session, user.id)
     return user
 
 

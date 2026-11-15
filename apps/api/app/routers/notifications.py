@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.briefing import BRIEFING_NAME, ensure_default
-from app.db import get_session
+from app.db import get_session, set_tenant_guc
 from app.models import User
 from app.notifications import valid_timezone
 from app.security import error, require_user
@@ -127,6 +127,9 @@ async def read_schedule(
 ) -> dict:
     await ensure_default(session, user.id)
     await session.commit()
+    # set_config(..., true) is transaction-local: commit ends the
+    # transaction it scoped, so the read below needs it re-applied.
+    await set_tenant_guc(session, user.id)
     return await _schedule(session, user.id)
 
 
@@ -159,6 +162,7 @@ async def update_schedule(
         },
     )
     await session.commit()
+    await set_tenant_guc(session, user.id)
     return await _schedule(session, user.id)
 
 

@@ -18,7 +18,7 @@ from app.integrations.requirements import missing_connection
 from app.ai.usage import estimate_cost_usd
 from app.observe import record_usage
 from app.context import build_context
-from app.db import get_session, session_scope
+from app.db import get_session, session_scope, set_tenant_guc
 from app.models import Conversation, Message, ModelUsage, User
 from app.security import error, require_user
 from app.tasks_service import create_task_from_plan
@@ -182,11 +182,13 @@ async def add_message(
     session.add(_user_message(row, body.content))
     row.updated_at = datetime.now(UTC)
     await session.commit()
+    await set_tenant_guc(session, user.id)
 
     try:
         reply, usage, plan, usage_row = await _reply(session, row)
     except HTTPException as exc:
         await session.commit()
+        await set_tenant_guc(session, user.id)
         await _save_reply(row, _failure_note(exc), None)
         raise
     saved = await _save_reply(row, reply, usage)
@@ -221,6 +223,7 @@ async def stream(
         text = ""
         try:
             async with session_scope() as stream_session:
+                await set_tenant_guc(stream_session, user.id)
                 conversation = await stream_session.get(Conversation, conversation_id)
                 context = await build_context(stream_session, conversation)
             async for delta in model.stream(context):
@@ -233,6 +236,7 @@ async def stream(
         # Persisted after the final event. If the client disconnects before
         # this point the reply is lost; the user's message is not.
         async with session_scope() as stream_session:
+            await set_tenant_guc(stream_session, user.id)
             conversation = await stream_session.get(Conversation, conversation_id)
             await _save_reply(conversation, text, None, stream_session)
 
@@ -333,6 +337,7 @@ async def _save_reply(
     owns_session = session is None
     if session is None:
         session = session_scope()
+        await set_tenant_guc(session, conversation.user_id)
     message = Message(
         id=uuid.uuid4(),
         conversation_id=conversation.id,

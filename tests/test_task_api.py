@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 from app.ai.schemas import Plan, PlanStep
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc
 from app.jobs import IdempotencyConflict, request_hash, resolve_idempotency
 from app.tasks_service import create_task_from_plan
 from sqlalchemy import text
@@ -88,7 +88,9 @@ async def test_cancel_queued_job_and_reject_lease_fields(client):
     cancelled = await client.post(f"/api/v1/tasks/{task_id}/cancel", headers=headers)
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
+    user_id = await _user_id(client, headers)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         status = (
             await session.execute(
                 text("SELECT status FROM jobs WHERE task_id = :id"),
@@ -113,6 +115,7 @@ async def test_approval_plan_is_not_enqueued(client):
 
 async def _counts(user_id: uuid.UUID) -> tuple[int, int, int]:
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         tasks = (
             await session.execute(
                 text("SELECT count(*) FROM tasks WHERE user_id = :id"), {"id": user_id}
@@ -151,6 +154,7 @@ async def test_idempotency_replay_returns_the_same_task(client):
     assert first.json()["id"] == second.json()["id"]
     assert (await _counts(user_id)) == (1, 1, 1)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         priority = (
             await session.execute(
                 text("SELECT priority FROM jobs WHERE user_id = :id"), {"id": user_id}
@@ -231,6 +235,7 @@ async def test_unique_violation_rolls_back_task_job_and_key(client):
     )
 
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         try:
             await create_task_from_plan(
                 session,
@@ -251,6 +256,7 @@ async def test_unique_violation_rolls_back_task_job_and_key(client):
 
     assert (await _counts(user_id)) == (1, 1, 1)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         replayed = await resolve_idempotency(session, user_id, key, digest)
         with pytest.raises(IdempotencyConflict):
             await resolve_idempotency(session, user_id, key, "different-hash")

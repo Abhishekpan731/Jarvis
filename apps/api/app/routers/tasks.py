@@ -17,7 +17,7 @@ from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
 from app.observe import record_usage
 from app.integrations.requirements import missing_connection
-from app.db import get_session
+from app.db import get_session, set_tenant_guc
 from app.jobs import (
     IdempotencyConflict,
     lookup_idempotency,
@@ -115,8 +115,13 @@ async def create_task(
         if usage_row is not None:
             usage_row.task_id = task_id
         await session.commit()
+        # set_config(..., true) is transaction-local: commit ends the
+        # transaction it scoped, so every further RLS-guarded read on this
+        # session must re-scope it first.
+        await set_tenant_guc(session, user.id)
     except IntegrityError:
         await session.rollback()
+        await set_tenant_guc(session, user.id)
         if not idempotency_key:
             raise
         task_id = await _replay_after_conflict(session, user.id, idempotency_key, digest)
@@ -206,6 +211,7 @@ async def cancel_task(
     if updated.rowcount:
         await _set_task_status(session, task_id, task["status"], "cancelled", "user", "cancelled")
         await session.commit()
+        await set_tenant_guc(session, user.id)
         return await _task_body(session, user.id, task_id, status_code=200)
     running = await session.execute(
         text(
@@ -218,6 +224,7 @@ async def cancel_task(
         {"task_id": task_id, "user_id": user.id},
     )
     await session.commit()
+    await set_tenant_guc(session, user.id)
     if running.rowcount == 0:
         raise HTTPException(409, error("not_cancellable", "No active job to cancel."))
     return await _task_body(session, user.id, task_id, status_code=202)
@@ -249,6 +256,7 @@ async def retry_task(
     try:
         await insert_job(session, user_id=user.id, task_id=task_id)
         await session.commit()
+        await set_tenant_guc(session, user.id)
     except IntegrityError:
         await session.rollback()
         raise HTTPException(409, error("job_active", "An active job already exists for this task."))

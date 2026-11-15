@@ -4,7 +4,7 @@ import asyncio
 import uuid
 
 import pytest
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc, set_worker_guc
 from app.jobs import (
     LeaseLost,
     claim_one,
@@ -36,6 +36,7 @@ async def _user() -> uuid.UUID:
 async def _task(user_id: uuid.UUID, status: str = "created") -> uuid.UUID:
     task_id = uuid.uuid4()
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         session.add(
             Task(
                 id=task_id,
@@ -67,6 +68,7 @@ async def _task(user_id: uuid.UUID, status: str = "created") -> uuid.UUID:
 async def _isolate(user_ids: list[uuid.UUID]) -> None:
     """Hide leftover jobs from earlier failed runs so this test owns the queue."""
     async with session_scope() as session:
+        await set_worker_guc(session)
         await session.execute(
             text(
                 """
@@ -109,6 +111,7 @@ async def test_one_user_is_not_claimed_twice_while_running():
     assert first is not None
     assert second is None
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         statuses = (
             await session.execute(
                 text("SELECT status FROM jobs WHERE user_id = :id ORDER BY created_at"),
@@ -135,6 +138,7 @@ async def test_stale_token_cannot_complete_or_heartbeat():
         async with session_scope() as session:
             await complete_job(session, claimed["id"], stale)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         status = (
             await session.execute(text("SELECT status FROM jobs WHERE id = :id"), {"id": job_id})
         ).scalar_one()
@@ -150,6 +154,7 @@ async def test_expired_lease_is_reaped_and_retried():
         claimed = await claim_one(session, worker_id="dead", lease_seconds=60)
     assert claimed is not None
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         await session.execute(
             text("UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :id"),
             {"id": job_id},
@@ -159,6 +164,7 @@ async def test_expired_lease_is_reaped_and_retried():
         recovered = await reap_expired(session, only_id=job_id)
     assert recovered == 1
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         row = (
             await session.execute(
                 text("SELECT status, lease_token, last_error FROM jobs WHERE id = :id"),
@@ -189,6 +195,7 @@ async def test_permanent_error_fails_without_another_attempt():
         )
     assert status == "failed"
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         row = (
             await session.execute(text("SELECT status, attempt_count FROM jobs WHERE id = :id"), {"id": job_id})
         ).one()
@@ -204,6 +211,7 @@ async def test_permanent_error_fails_without_another_attempt():
 async def insert_ready(user_id: uuid.UUID) -> uuid.UUID:
     task_id = await _task(user_id)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         job_id = await insert_job(session, user_id=user_id, task_id=task_id)
         await session.commit()
     return job_id

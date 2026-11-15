@@ -9,7 +9,7 @@ from app.ai.base import NotConfigured
 from app.ai.provider_factory import get_model
 from app.ai.schemas import Plan, PlanStep
 from app.ai.supervisor import plan_request, validate_plan
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc
 from app.execution import execute_task
 from app.models import Message, Task, TaskStep
 from app.tasks_service import create_task_from_plan
@@ -133,8 +133,10 @@ async def test_plan_execution_persists_the_state_machine(client):
         steps=[PlanStep(agent="research", action="compare the two libraries")],
     )
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         task_id = await create_task_from_plan(session, user_id, None, plan)
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         task = await session.get(Task, task_id)
         job = (
             await session.execute(

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.schemas import Usage
 from app.ai.usage import estimate_cost_usd
+from app.db import set_worker_guc
 from app.models import ModelUsage
 
 log = logging.getLogger("jarvis.observe")
@@ -63,7 +64,12 @@ async def record_usage(
 
 
 async def queue_depth(session: AsyncSession) -> dict[str, int]:
-    """Count jobs by status. The query selects no payload and no instruction."""
+    """Count jobs by status. The query selects no payload and no instruction.
+
+    Deliberately narrow admin bypass: this aggregate must see every tenant's
+    jobs, so it sets the worker escape-hatch GUC rather than a tenant GUC.
+    """
+    await set_worker_guc(session)
     rows = (
         await session.execute(text("SELECT status, count(*) FROM jobs GROUP BY status"))
     ).all()

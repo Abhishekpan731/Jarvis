@@ -12,7 +12,7 @@ import uuid
 from sqlalchemy import select
 
 from app.ai.base import NotConfigured, ProviderError
-from app.db import session_scope
+from app.db import session_scope, set_tenant_guc
 from app.integrations import google
 from app.integrations.crypto import open_tokens, seal
 from app.models import Integration, TaskStep
@@ -45,6 +45,7 @@ async def run_step(user_id: uuid.UUID, step: TaskStep) -> str:
 
 async def _load(user_id: uuid.UUID, provider: str) -> dict | None:
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         row = (
             await session.execute(
                 select(Integration).where(
@@ -80,6 +81,7 @@ async def _read(user_id: uuid.UUID, provider: str, tokens: dict) -> str:
 async def _save(user_id: uuid.UUID, provider: str, tokens: dict) -> None:
     ciphertext = seal({k: v for k, v in tokens.items() if v is not None})
     async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
         row = (
             await session.execute(
                 select(Integration).where(

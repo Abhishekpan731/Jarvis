@@ -4,7 +4,10 @@ Claim, heartbeat, and result writes are short transactions. The step runner
 is never called while a transaction is open. Lease tokens are minted here,
 never accepted from an HTTP client.
 
-RLS is not a control. API callers must pass the authenticated user id.
+RLS is a second barrier, not a replacement for the explicit WHERE user_id
+filters below. The worker claims jobs across tenants by design, so these
+helpers set the app.worker escape-hatch GUC (and the owning tenant's
+app.user_id when resolvable) before touching RLS-forced tables.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.db import set_tenant_guc, set_worker_guc
 
 JOB_TYPE = "task_execution"
 ACTIVE = ("queued", "running", "retry_wait")
@@ -38,6 +42,18 @@ PERMANENT_ERRORS = frozenset(
         "integration_token_rejected",
     }
 )
+
+
+async def _enter_worker_scope(session: AsyncSession, job_id: uuid.UUID) -> None:
+    """Mark this transaction as the worker's and, when the job is resolvable,
+    also scope it to that job's owner (defense in depth alongside app.worker).
+    """
+    await set_worker_guc(session)
+    owner = (
+        await session.execute(text("SELECT user_id FROM jobs WHERE id = :id"), {"id": job_id})
+    ).scalar_one_or_none()
+    if owner is not None:
+        await set_tenant_guc(session, owner)
 
 
 class IdempotencyConflict(Exception):
@@ -221,6 +237,7 @@ async def claim_one(
     per_user_max: int | None = None,
 ) -> dict[str, Any] | None:
     """Claim one queued job and commit ownership. Returns None if nothing was claimed."""
+    await set_worker_guc(session)
     token = uuid.uuid4()
     lease = lease_seconds if lease_seconds is not None else settings.worker_lease_seconds
     result = await session.execute(
@@ -245,6 +262,7 @@ async def claim_one(
 async def heartbeat(
     session: AsyncSession, job_id: uuid.UUID, token: uuid.UUID, lease_seconds: int | None = None
 ) -> bool:
+    await _enter_worker_scope(session, job_id)
     result = await session.execute(
         text(
             """
@@ -279,6 +297,7 @@ async def cancel_if_requested(
     means the lease was lost: stop, and do not write the task. A task that is
     already terminal is left as it is.
     """
+    await _enter_worker_scope(session, job_id)
     updated = await session.execute(
         text(
             """
@@ -316,6 +335,7 @@ async def cancel_if_requested(
 
 
 async def still_owner(session: AsyncSession, job_id: uuid.UUID, token: uuid.UUID) -> bool:
+    await _enter_worker_scope(session, job_id)
     row = (
         await session.execute(
             text(
@@ -346,6 +366,7 @@ async def reap_expired(
     session: AsyncSession, *, limit: int = 10, only_id: uuid.UUID | None = None
 ) -> int:
     """Recover expired running jobs. Each job is its own transaction."""
+    await set_worker_guc(session)
     ids = (
         await session.execute(
             text(
@@ -365,11 +386,12 @@ async def reap_expired(
     recovered = 0
     for job_id in ids:
         async with session.begin():
+            await set_worker_guc(session)
             row = (
                 await session.execute(
                     text(
                         """
-                        SELECT id, task_id, attempt_count, max_attempts, cancel_requested
+                        SELECT id, task_id, user_id, attempt_count, max_attempts, cancel_requested
                         FROM jobs
                         WHERE id = :id AND status = 'running' AND lease_expires_at <= now()
                         FOR UPDATE SKIP LOCKED
@@ -380,6 +402,7 @@ async def reap_expired(
             ).mappings().one_or_none()
             if row is None:
                 continue
+            await set_tenant_guc(session, row["user_id"])
             if row["cancel_requested"]:
                 await _terminal_job(session, row["id"], row["task_id"], "cancelled", "cancelled")
             elif row["attempt_count"] >= row["max_attempts"]:
@@ -407,6 +430,7 @@ async def reap_expired(
 
 
 async def promote_retry_wait(session: AsyncSession, *, limit: int = 10) -> int:
+    await set_worker_guc(session)
     result = await session.execute(
         text(
             """
@@ -443,6 +467,7 @@ async def fail_job(
     max_attempts: int,
 ) -> str:
     """Move a fenced job to retry_wait or failed. Returns the new job status."""
+    await _enter_worker_scope(session, job_id)
     permanent = error_code in PERMANENT_ERRORS or attempt_count >= max_attempts
     if permanent:
         updated = await session.execute(
@@ -496,6 +521,7 @@ async def fail_job(
 
 
 async def complete_job(session: AsyncSession, job_id: uuid.UUID, token: uuid.UUID) -> None:
+    await _enter_worker_scope(session, job_id)
     updated = await session.execute(
         text(
             """
