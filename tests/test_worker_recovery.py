@@ -119,3 +119,62 @@ async def test_email_step_without_a_connection_fails_permanently(monkeypatch):
     assert row.last_error == "integration_required"
     assert task.status == "failed"
     assert task.error == "integration_required"
+
+
+
+@pytest.mark.asyncio
+async def test_running_job_cancels_under_lease_token():
+    user_id, task_id = uuid.uuid4(), uuid.uuid4()
+    async with session_scope() as session:
+        session.add(User(id=user_id, email=f"{user_id}@example.com", password_hash="x", display_name="t"))
+        await session.commit()
+    async with session_scope() as session:
+        session.add(Task(id=task_id, user_id=user_id, title="t", instruction="t", status="executing"))
+        session.add(TaskEvent(task_id=task_id, from_status="planning", to_status="executing", reason="t", actor="t"))
+        await session.flush()
+        job_id = await insert_job(session, user_id=user_id, task_id=task_id)
+        await session.execute(
+            text("UPDATE jobs SET available_at = now() + interval '1 day' WHERE status = 'queued' AND id <> :id"),
+            {"id": job_id},
+        )
+        await session.commit()
+
+    async with session_scope() as session:
+        claimed = await claim_one(session, worker_id="live", lease_seconds=60)
+    assert claimed["id"] == job_id
+    async with session_scope() as session:
+        await session.execute(
+            text("UPDATE jobs SET cancel_requested = true WHERE id = :id AND status = 'running'"),
+            {"id": job_id},
+        )
+        await session.commit()
+
+    runner = Runner("live")
+    await runner._cancel_if_requested(job_id, uuid.uuid4())
+    async with session_scope() as session:
+        stale = (
+            await session.execute(
+                text("SELECT status, lease_token, cancel_requested FROM jobs WHERE id = :id"),
+                {"id": job_id},
+            )
+        ).one()
+        task = (await session.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id})).scalar()
+    assert stale.status == "running"
+    assert stale.cancel_requested is True
+    assert stale.lease_token == claimed["lease_token"]
+    assert task == "executing"
+
+    await runner._cancel_if_requested(job_id, claimed["lease_token"])
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                text("SELECT status, lease_token, cancel_requested, last_error FROM jobs WHERE id = :id"),
+                {"id": job_id},
+            )
+        ).one()
+        task = (await session.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id})).scalar()
+    assert row.status == "cancelled"
+    assert row.lease_token is None
+    assert row.cancel_requested is False
+    assert row.last_error == "cancelled"
+    assert task == "cancelled"

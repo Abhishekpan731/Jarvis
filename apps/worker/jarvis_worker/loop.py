@@ -17,6 +17,7 @@ from app.db import session_scope
 from app.execution import LeaseLost, execute_task_durable
 from app.integrations.runner import IntegrationStepError, run_step
 from app.jobs import (
+    cancel_if_requested,
     claim_one,
     complete_job,
     fail_job,
@@ -155,7 +156,25 @@ class Runner:
             async with session_scope() as session:
                 alive = await heartbeat(session, job_id, token)
             if not alive:
+                await self._cancel_if_requested(job_id, token)
                 return
+
+    async def _cancel_if_requested(self, job_id, token) -> None:
+        """Fence-cancel after heartbeat returns 0. A lost lease writes nothing."""
+        if self.shutdown.is_set():
+            return
+        async with session_scope() as session:
+            task_id = (
+                await session.execute(
+                    text("SELECT task_id FROM jobs WHERE id = :id"),
+                    {"id": job_id},
+                )
+            ).scalar_one_or_none()
+            if task_id is None:
+                return
+            cancelled = await cancel_if_requested(session, job_id, token, task_id)
+        if cancelled:
+            _log("job_cancelled", worker_id=self.worker, job_id=str(job_id), task_id=str(task_id))
 
     async def _owns(self, job_id, token) -> bool:
         async with session_scope() as session:

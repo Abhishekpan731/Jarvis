@@ -7,8 +7,8 @@ accepted from clients.
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,12 @@ from app.ai.supervisor import plan_request
 from app.observe import record_usage
 from app.integrations.requirements import missing_connection
 from app.db import get_session
-from app.jobs import IdempotencyConflict, lookup_idempotency, request_hash, store_idempotency
+from app.jobs import (
+    IdempotencyConflict,
+    lookup_idempotency,
+    request_hash,
+    resolve_idempotency,
+)
 from app.limits import limit_writes
 from app.models import User
 from app.security import error, require_user
@@ -34,28 +39,39 @@ class TaskIn(BaseModel):
     model_config = {"extra": "ignore"}
 
 
-def _reject_lease_fields(body: dict) -> None:
-    forbidden = {"worker_id", "lease_token", "lease_expires_at"}
+def _reject_client_owned_fields(body: dict) -> None:
+    """Lease, owner, and status are server-owned. Clients cannot set them."""
+    forbidden = {"worker_id", "lease_token", "lease_expires_at", "user_id", "status"}
     if forbidden & body.keys():
-        raise HTTPException(400, error("invalid_request", "Lease fields are not accepted."))
+        raise HTTPException(400, error("invalid_request", "Server-owned fields are not accepted."))
 
 
 @router.post("")
 async def create_task(
-    body: TaskIn,
+    request: Request,
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
     limit_writes(user.id)
-    _reject_lease_fields(body.model_dump())
+    raw = await request.json()
+    if not isinstance(raw, dict):
+        raise HTTPException(400, error("invalid_request", "Request body must be an object."))
+    # Checked before validation so extra=ignore cannot hide a client-owned field.
+    _reject_client_owned_fields(raw)
+    try:
+        body = TaskIn.model_validate(raw)
+    except ValidationError:
+        raise HTTPException(400, error("invalid_request", "Invalid task request."))
     digest = request_hash(body.instruction, body.priority)
     if idempotency_key:
         existing = await lookup_idempotency(session, user.id, idempotency_key)
         if existing is not None:
             previous_hash, task_id = existing
             if previous_hash != digest:
-                raise HTTPException(409, error("idempotency_conflict", "Key reused with a different request."))
+                raise HTTPException(
+                    409, error("idempotency_conflict", "Key reused with a different request.")
+                )
             return await _task_body(session, user.id, task_id, status_code=200)
 
     try:
@@ -82,37 +98,32 @@ async def create_task(
             error("integration_required", f"Connect {missing.replace('_', ' ')} before this can run."),
         )
 
-    if plan.requires_approval:
+    # One transaction: task, steps, job (if any), priority, usage, and the key.
+    # A unique-key conflict rolls all of them back. Approval plans insert no job.
+    try:
         task_id = await create_task_from_plan(
-            session, user.id, None, plan, enqueue=False, commit=usage_row is None
+            session,
+            user.id,
+            None,
+            plan,
+            enqueue=not plan.requires_approval,
+            commit=False,
+            priority=body.priority,
+            idempotency_key=idempotency_key,
+            request_hash=digest if idempotency_key else None,
         )
         if usage_row is not None:
             usage_row.task_id = task_id
-            await session.commit()
-        if idempotency_key:
-            await _save_key(session, user.id, idempotency_key, digest, task_id)
-        return await _task_body(session, user.id, task_id, status_code=202)
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        if not idempotency_key:
+            raise
+        task_id = await _replay_after_conflict(session, user.id, idempotency_key, digest)
+        return await _task_body(session, user.id, task_id, status_code=200)
 
-    task_id = await create_task_from_plan(
-        session, user.id, None, plan, enqueue=True, commit=usage_row is None
-    )
-    if usage_row is not None:
-        usage_row.task_id = task_id
-        await session.commit()
-    if body.priority:
-        await session.execute(
-            text(
-                """
-                UPDATE jobs SET priority = :priority
-                WHERE task_id = :task_id AND user_id = :user_id AND status = 'queued'
-                """
-            ),
-            {"priority": body.priority, "task_id": task_id, "user_id": user.id},
-        )
-        await session.commit()
-    if idempotency_key:
-        await _save_key(session, user.id, idempotency_key, digest, task_id)
-    return await _task_body(session, user.id, task_id, status_code=201)
+    status_code = 202 if plan.requires_approval else 201
+    return await _task_body(session, user.id, task_id, status_code=status_code)
 
 
 @router.get("")
@@ -244,19 +255,16 @@ async def retry_task(
     return await _task_body(session, user.id, task_id, status_code=202)
 
 
-async def _save_key(
-    session: AsyncSession, user_id: uuid.UUID, key: str, digest: str, task_id: uuid.UUID
-) -> None:
+async def _replay_after_conflict(
+    session: AsyncSession, user_id: uuid.UUID, key: str, digest: str
+) -> uuid.UUID:
+    """Read the key that won the unique constraint. Never inserts."""
     try:
-        await store_idempotency(
-            session, user_id=user_id, key=key, request_hash=digest, task_id=task_id
+        return await resolve_idempotency(session, user_id, key, digest)
+    except IdempotencyConflict:
+        raise HTTPException(
+            409, error("idempotency_conflict", "Key reused with a different request.")
         )
-        await session.commit()
-    except (IdempotencyConflict, IntegrityError):
-        await session.rollback()
-        existing = await lookup_idempotency(session, user_id, key)
-        if existing is None or existing[0] != digest:
-            raise HTTPException(409, error("idempotency_conflict", "Key reused with a different request."))
 
 
 async def _owned_task(session: AsyncSession, user_id: uuid.UUID, task_id: uuid.UUID):

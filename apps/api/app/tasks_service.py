@@ -24,11 +24,15 @@ async def create_task_from_plan(
     *,
     enqueue: bool = True,
     commit: bool = True,
+    priority: int = 0,
+    idempotency_key: str | None = None,
+    request_hash: str | None = None,
 ) -> uuid.UUID:
     """Persist a task, its steps, and (unless approval is required) one job.
 
-    Commits before returning unless the caller still has rows to attach.
-    Does not execute the task.
+    When an idempotency key is supplied, the key row is written in the same
+    transaction as the task and job. Commits before returning unless the
+    caller still has rows to attach. Does not execute the task.
     """
     now = datetime.now(UTC)
     waiting = plan.requires_approval
@@ -68,7 +72,20 @@ async def create_task_from_plan(
     session.add_all(steps)
     await session.flush()
     if enqueue and not waiting:
-        await insert_job(session, user_id=user_id, task_id=task.id)
+        await insert_job(session, user_id=user_id, task_id=task.id, priority=priority)
+    if idempotency_key is not None:
+        if request_hash is None:
+            raise ValueError("request_hash is required with an idempotency key")
+        # Imported here so a caller that never stores a key does not need it.
+        from app.jobs import store_idempotency
+
+        await store_idempotency(
+            session,
+            user_id=user_id,
+            key=idempotency_key,
+            request_hash=request_hash,
+            task_id=task.id,
+        )
     if commit:
         await session.commit()
     return task.id

@@ -134,23 +134,39 @@ async def store_idempotency(
     request_hash: str,
     task_id: uuid.UUID,
 ) -> None:
-    try:
-        await session.execute(
-            text(
-                """
-                INSERT INTO idempotency_keys (user_id, key, request_hash, task_id, created_at)
-                VALUES (:user_id, :key, :request_hash, :task_id, now())
-                """
-            ),
-            {
-                "user_id": user_id,
-                "key": key,
-                "request_hash": request_hash,
-                "task_id": task_id,
-            },
-        )
-    except IntegrityError as exc:
-        raise IdempotencyConflict from exc
+    """Insert a key row. Caller owns the transaction and the unique-violation rollback.
+
+    Does not commit and does not catch IntegrityError. A unique violation must
+    roll back the task and job that share this transaction, not only this row.
+    """
+    await session.execute(
+        text(
+            """
+            INSERT INTO idempotency_keys (user_id, key, request_hash, task_id, created_at)
+            VALUES (:user_id, :key, :request_hash, :task_id, now())
+            """
+        ),
+        {
+            "user_id": user_id,
+            "key": key,
+            "request_hash": request_hash,
+            "task_id": task_id,
+        },
+    )
+
+
+async def resolve_idempotency(
+    session: AsyncSession, user_id: uuid.UUID, key: str, digest: str
+) -> uuid.UUID:
+    """Re-read a key after a rolled-back insert.
+
+    Same hash returns the original task. A different hash, or a key that is
+    not yet visible, raises IdempotencyConflict.
+    """
+    existing = await lookup_idempotency(session, user_id, key)
+    if existing is None or existing[0] != digest:
+        raise IdempotencyConflict
+    return existing[1]
 
 
 _CLAIM = text(
@@ -252,6 +268,51 @@ async def heartbeat(
     )
     await session.commit()
     return result.rowcount == 1
+
+
+async def cancel_if_requested(
+    session: AsyncSession, job_id: uuid.UUID, token: uuid.UUID, task_id: uuid.UUID
+) -> bool:
+    """Cancel a running job under the fence when cancel was requested.
+
+    Matches id, lease_token, status running, and an unexpired lease. Rowcount 0
+    means the lease was lost: stop, and do not write the task. A task that is
+    already terminal is left as it is.
+    """
+    updated = await session.execute(
+        text(
+            """
+            UPDATE jobs
+            SET status = 'cancelled',
+                completed_at = now(),
+                last_error = 'cancelled',
+                worker_id = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                locked_at = NULL,
+                cancel_requested = false
+            WHERE id = :id
+              AND lease_token = :token
+              AND status = 'running'
+              AND lease_expires_at > now()
+              AND cancel_requested = true
+            """
+        ),
+        {"id": job_id, "token": token},
+    )
+    if updated.rowcount != 1:
+        await session.rollback()
+        return False
+    row = (
+        await session.execute(
+            text("SELECT status FROM tasks WHERE id = :id FOR UPDATE"),
+            {"id": task_id},
+        )
+    ).one_or_none()
+    if row is not None and row.status not in ("completed", "cancelled", "failed"):
+        await _transition_task(session, task_id, "cancelled", "worker", "cancel requested")
+    await session.commit()
+    return True
 
 
 async def still_owner(session: AsyncSession, job_id: uuid.UUID, token: uuid.UUID) -> bool:
