@@ -1,6 +1,10 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    # `jarvis` is the owner role; it creates the database and runs migrations.
+    # Migration 0009 creates a second, non-owner `jarvis_app` login role (see
+    # JARVIS_APP_DB_PASSWORD in .env.example) that the application connects
+    # as at runtime, so Postgres row-level security is actually enforced.
     environment:
       POSTGRES_USER: jarvis
       POSTGRES_PASSWORD: jarvis
@@ -28,6 +32,117 @@ services:
       timeout: 5s
       retries: 10
 
+  # Scaffolding only: nothing in the app calls LocalStack or uses S3 yet.
+  # Provisioned ahead of a future object-storage feature so the local
+  # environment can be extended without introducing new infrastructure
+  # at that time. Dummy credentials only; never point this at real AWS.
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PERSISTENCE: 1
+    volumes:
+      - jarvis-localstack:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot. Alembic runs as the table owner (`jarvis` / password `jarvis`,
+  # the same values the postgres service was initialized with). Do not
+  # interpolate POSTGRES_PASSWORD here: a copied .env.example used to set
+  # that to `change-me`, which cannot log in to this database.
+  migrate:
+    image: jarvis-api:local
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL_SYNC: postgresql+psycopg://jarvis:jarvis@postgres:5432/jarvis
+      JARVIS_APP_DB_PASSWORD: ${JARVIS_APP_DB_PASSWORD:-change-me-app}
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: jarvis-api:local
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    # No env_file: a missing .env must not stop the stack. Host .env, when
+    # present, is still read for the ${VAR:-default} substitutions below.
+    # Containers reach Postgres and Redis by service name, not the published
+    # host ports (5433 / 6380), which are for host-side pytest and alembic.
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jarvis_app:${JARVIS_APP_DB_PASSWORD:-change-me-app}@postgres:5432/jarvis
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-not-for-production}
+      FERNET_KEY: ${FERNET_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  worker:
+    image: jarvis-worker:local
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jarvis_app:${JARVIS_APP_DB_PASSWORD:-change-me-app}@postgres:5432/jarvis
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      FERNET_KEY: ${FERNET_KEY:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # A transient permission or connection error used to exit the process and
+    # leave the durable queue undrained until someone noticed. Restart it.
+    # Health is the image HEALTHCHECK: the endpoint binds 127.0.0.1, which a
+    # Compose-network probe cannot reach.
+    restart: unless-stopped
+
+  web:
+    image: jarvis-web:local
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   jarvis-postgres:
   jarvis-redis:
+  jarvis-localstack:
