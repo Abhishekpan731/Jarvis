@@ -29,5 +29,11 @@
     "eslint": "^9",
     "eslint-config-next": "15.5.29",
     "@eslint/eslintrc": "^3"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.8"
+    },
+    "postcss": "8.5.33"
   }
 }
