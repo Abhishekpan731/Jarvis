@@ -3,8 +3,10 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-**Status:** Phase 1 (foundation). This document is the source of truth for
-structure, boundaries, and constraints. It is updated at the end of every phase.
+**Status:** Phases 1 through 11 are implemented and tested. Phase 12 (production
+deployment) is not. This document is the source of truth for structure,
+boundaries, and constraints. Current status is in
+[roadmap.md](roadmap.md#current-implementation-status).
 
 **Product principle:** One AI brain. One persistent memory. Multiple specialist
 agents. One continuous task engine. Accessible everywhere through a browser.
@@ -42,7 +44,7 @@ flowchart TB
     end
 
     subgraph edge ["Edge"]
-        proxy["Reverse proxy + TLS<br/>Caddy"]
+        proxy["Reverse proxy + TLS<br/>not provisioned"]
     end
 
     subgraph app ["JARVIS cloud"]
@@ -280,31 +282,32 @@ protocol because there is no local replica.
 
 ## 10. Deployment
 
-`docker-compose.yml` runs the full stack locally: Postgres, Redis, API, worker,
-web, and Caddy. The same images deploy to a single host or a managed platform
-without code changes; only environment variables differ.
+`docker-compose.yml` runs PostgreSQL, Redis, LocalStack, a one-shot migrate
+service, the API, the worker, and the web app. There is no reverse proxy in
+Compose. The same images deploy to a single host without code changes; only
+environment variables differ.
 
-Production expects managed PostgreSQL, managed Redis, and S3-compatible object
-storage. Terraform under `infrastructure/terraform/` is intentionally empty in
-Phase 1 — infrastructure is not provisioned until the application justifies it.
+Production expects managed PostgreSQL and S3-compatible object storage. Redis is
+an auxiliary cache and rate-limit store, not the task queue. Terraform is not
+provisioned; infrastructure waits until the application justifies it.
 
 ---
 
 ## 11. Phase status
 
 | Phase | Scope | Status |
-|---|---|---|
-| 1 | Architecture, monorepo, database, auth, health, task state machine | **In progress** |
-| 2 | User management, sessions, preferences | Not started |
-| 3 | Conversations and model provider integration | Not started |
-| 4 | Persistent memory and retrieval | Not started |
-| 5 | Agent orchestration | Not started |
-| 6 | Durable task execution and worker | Not started |
-| 7 | Voice interface | Not started |
-| 8 | External integrations | Not started |
-| 9 | Notifications and automations | Not started |
-| 10 | Security hardening | Not started |
-| 11 | Observability | Not started |
+| --- | --- | --- |
+| 1 | Architecture, monorepo, database, auth, health, task state machine | Implemented |
+| 2 | User management, sessions, preferences | Implemented |
+| 3 | Conversations and model provider integration | Implemented |
+| 4 | Persistent memory and retrieval | Implemented |
+| 5 | Agent orchestration | Implemented |
+| 6 | Durable task execution and worker | Implemented |
+| 7 | Voice interface | Implemented |
+| 8 | External integrations | Implemented |
+| 9 | Notifications and automations | Implemented |
+| 10 | Security hardening | Implemented |
+| 11 | Observability | Implemented |
 | 12 | Production deployment | Not started |
 
 ---
@@ -342,9 +345,12 @@ deploy, publish, or transfer. The model cannot add an agent or lower a risk.
 
 ### Limitations
 
-- Execution is in-process. It does not survive an API restart.
-- A streamed reply is stored after the final event. A client that disconnects
-  before that point loses the reply. The user's message is already stored.
+- A plan that needs execution is persisted as a task and a `jobs` row. The
+  worker claims it with `FOR UPDATE SKIP LOCKED`. An API restart does not lose
+  that work. A streamed reply that never becomes a task is still stored only
+  after the final event.
+- A client that disconnects before the final event loses the reply. The user's
+  message is already stored.
 - Task creation commits separately from the reply. A crash between the two can
   leave a reply without its task.
 - Context budgeting counts characters, not tokens. It is a ceiling, not an
