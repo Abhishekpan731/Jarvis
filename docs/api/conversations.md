@@ -49,6 +49,7 @@ No event carries credentials or hidden reasoning.
 | 401 | `unauthenticated` | Missing or expired token |
 | 404 | `not_found` | No such conversation for this account |
 | 422 | `invalid_request` | Body failed validation |
-| 422 | `invalid_source` | `source` is not `web`, `siri`, `google_assistant`, `desktop`, or `api` |
-| 503 | `ai_not_configured` | `OPENAI_API_KEY` is not set and `source` is not a device assistant |
-| 503 | `provider_error` | The provider returned an error |
+| 422 | `invalid_source` | `source` is not a known command source |
+| 422 | `invalid_status` | `status` is not `active` or `archived` |
+| 503 | `ai_not_configured` | No model provider is configured and `source` is not a device assistant. Raised by `POST .../messages`. The stream reports the same condition as an `error` event instead of an HTTP status |
+| 503 | `provider_error` | Raised by `POST .../messages` when the provider fails. The stream reports the same condition as an `error` event and does not set an HTTP status, because the response has already started |

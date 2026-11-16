@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: jarvis
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      serviceAccountName: jarvis-job-reader
+      initContainers:
+        - name: wait-for-migrate
+          image: registry.k8s.io/kubectl:v1.31.0
+          command:
+            - kubectl
+            - -n
+            - jarvis
+            - wait
+            - --for=condition=complete
+            - job/migrate
+            - --timeout=180s
+      containers:
+        - name: worker
+          image: jarvis-worker:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: {name: jarvis-worker-secret}
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+      restartPolicy: Always

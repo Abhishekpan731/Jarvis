@@ -37,9 +37,19 @@ work.
 
 Changing a password also revokes every session. The caller must sign in again.
 
-## What is not enforced yet
+## Row-level security
 
-Row-level security policies exist, but the application connects as the table
-owner, which bypasses them. Isolation currently depends on every query
-filtering on `user_id`. A test confirms one user cannot read another's
-conversation. Forcing RLS for the application role is outstanding.
+Migration `0009` creates the non-owner role `jarvis_app` and forces row-level
+security on the tenant-owned tables. The API and the worker connect as
+`jarvis_app` (`DATABASE_URL` in `infra/compose/docker-compose.yml` and the
+Kubernetes app secrets). That role cannot bypass the policies. Migrations
+still connect as the owner role `jarvis` through `DATABASE_URL_SYNC`.
+
+Each request sets `app.user_id` with `set_config(..., true)`, which is
+transaction-local, so the value does not leak across a pooled connection.
+The worker sets `app.worker` for the same transaction and only the job-queue
+policies honor it. Queries also filter on `user_id`. That filter is the
+primary control; RLS is defense in depth.
+
+What is still outstanding: hard deletion of user data after soft deletion,
+and Redis-backed rate limiting. The login throttle is in-process.

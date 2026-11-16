@@ -224,9 +224,10 @@ capability list, a permission list, input/output schemas, a timeout, and a
 retry policy. Adding an agent means adding a record and a handler, not editing
 the orchestrator.
 
-Phase 1 registers the eight agents and their contracts. It does not yet give
-them real tools — an agent with no connected integration reports that fact
-instead of inventing a result.
+Phase 1 registers 18 agents and their contracts, seeded into the `agents` and
+`agent_capabilities` tables by migration `0001` (diagram above shows the
+eight most-used ones). It does not yet give them real tools — an agent with no
+connected integration reports that fact instead of inventing a result.
 
 ---
 
