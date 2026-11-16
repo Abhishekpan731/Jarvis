@@ -3,9 +3,9 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-`apps/worker` is the only process that executes durable tasks. The API creates
-a task and inserts a job. The worker claims that job. If the worker is not
-running, the task stays queued.
+`apps/worker` is the process that executes durable jobs. For runnable tasks,
+the API creates a task and inserts a job for the worker to claim. If the worker
+is not running, those jobs stay queued.
 
 Nothing in this process is installed on a user device. The browser never talks
 to the worker.
@@ -61,5 +61,7 @@ The port is not published off the host. In Docker, only the container
 ## What this process does not do
 
 - It does not accept HTTP commands from the browser.
-- It does not bypass approval. A task waiting for approval is not executed.
+- It does not bypass approval. A task in `waiting_for_approval` has no job,
+  so the worker cannot execute it. The current API has no approval or rejection
+  endpoint to move that task forward.
 - It does not invent a model reply when `OPENAI_API_KEY` is unset.

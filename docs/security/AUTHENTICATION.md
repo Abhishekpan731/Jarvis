@@ -3,53 +3,67 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-Complements [SECURITY.md](SECURITY.md) with the behaviour that is implemented.
+Complements [SECURITY.md](SECURITY.md) with authentication behavior and its
+known limits.
 
-## Tokens
+## Tokens and browser behavior
 
 | Token | Lifetime | Where it lives |
 |---|---|---|
-| Access token, JWT HS256 | 900 seconds | `Authorization: Bearer` header. The web app keeps it in `sessionStorage`, so it dies with the tab. |
-| Refresh token, 48 random bytes | 30 days | `jarvis_refresh` cookie. HttpOnly, SameSite=Lax, path restricted to `/api/v1/auth`. `Secure` in production. |
+| Access token, JWT HS256 | 900 seconds | Sent in `Authorization: Bearer`; the web client stores it in `sessionStorage`. |
+| Refresh token, 48 random bytes | 30 days | `jarvis_refresh` cookie: HttpOnly, SameSite=Lax, path `/api/v1/auth`; Secure only when `APP_ENV=production`. |
 
 The database stores the SHA-256 hash of the refresh token. The raw value is
-only in the cookie.
+only in the cookie. The web client does not automatically refresh or retry a
+request when its access token expires; the client must handle the resulting
+unauthorized response.
 
-## Rotation
+**Production blocker — JWT signing secret:** the application configuration
+has a long development fallback for `JWT_SECRET`. Production startup checks
+only that the configured value is at least 32 characters. If `JWT_SECRET` is
+unset, the fallback is used and passes that length check. Production must not
+run until configuration supplies a unique secret; startup does not fail closed
+when it is missing. See `apps/api/app/config/__init__.py` and
+`apps/api/app/main/__init__.py`.
+
+## Rotation and passwords
 
 `POST /api/v1/auth/refresh` issues a new refresh token and marks the presented
-one as replaced. Presenting a replaced token revokes every session in its
-family and commits that revocation before responding, so the family is dead
-even though the request itself failed.
+one as replaced. Reuse of a replaced token revokes every session in its family.
 
-## Passwords
+Passwords are hashed with Argon2id. Login failures return the same message for
+an unknown email and a wrong password. Changing a password revokes every
+session, so the caller must sign in again.
 
-Argon2id through `argon2-cffi`. Login failures return the same message for an
-unknown email and a wrong password. Eight failed attempts from one IP in five
-minutes return 429. The counter is in memory and resets on restart.
+## Login throttling
+
+Login allows eight failed attempts per client IP in a five-minute window. The
+counter is in-process and resets on restart. There is no per-user login limit;
+registration and refresh do not use this throttle. Selected task and assistant
+write routes have a separate in-process per-user limit of 30 requests per
+minute. These limits are not shared across application processes.
+
+Implementation: `apps/api/app/routers/auth/__init__.py` and
+`apps/api/app/limits/__init__.py`.
 
 ## Account deletion
 
 `DELETE /api/v1/auth/account` sets `deleted_at` and revokes every session for
-the account, so a token issued before deletion stops working immediately. The
-account can no longer log in. Rows are not yet erased; that is outstanding
-work.
-
-Changing a password also revokes every session. The caller must sign in again.
+the account. The account can no longer log in. Rows are not yet erased; hard
+deletion remains outstanding.
 
 ## Row-level security
 
-Migration `0009` creates the non-owner role `jarvis_app` and forces row-level
-security on the tenant-owned tables. The API and the worker connect as
-`jarvis_app` (`DATABASE_URL` in `infra/compose/docker-compose.yml` and the
-Kubernetes app secrets). That role cannot bypass the policies. Migrations
-still connect as the owner role `jarvis` through `DATABASE_URL_SYNC`.
+Migration `0009` creates the non-owner runtime role `jarvis_app` and forces RLS
+on these tenant tables only: `tasks`, `conversations`, `messages`, `memories`,
+`jobs`, `idempotency_keys`, `devices`, `sync_events`, `integrations`,
+`oauth_states`, `notifications`, `automations`, `task_steps`, and `task_events`.
 
-Each request sets `app.user_id` with `set_config(..., true)`, which is
-transaction-local, so the value does not leak across a pooled connection.
-The worker sets `app.worker` for the same transaction and only the job-queue
-policies honor it. Queries also filter on `user_id`. That filter is the
-primary control; RLS is defense in depth.
+RLS is not enabled for `users`, `sessions`, `user_preferences`, `agents`,
+`agent_capabilities`, `audit_logs`, or `model_usage`. There is no repository
+layer guarantee that all access is user-scoped; router handlers include direct
+SQL. Review those queries as well as the applicable RLS policy when changing
+data access.
 
-What is still outstanding: hard deletion of user data after soft deletion,
-and Redis-backed rate limiting. The login throttle is in-process.
+Source: `database/migrations/versions/revisions_0007_0009/0009_rls_hardening.py`;
+representative route SQL: `apps/api/app/routers/tasks/__init__.py`.

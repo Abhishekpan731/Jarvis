@@ -3,22 +3,25 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-**Status:** Phases 1 through 11 are implemented and tested. Phase 12 (production
-deployment) is not. This document is the source of truth for structure,
-boundaries, and constraints. Current status is in
-[roadmap.md](roadmap.md#current-implementation-status).
+**Status:** Code exists for work across phases 1 through 11, but some phase
+features remain incomplete and verification varies by feature. Phase 12
+(production deployment) is not provisioned. Tests and code review recorded in
+[roadmap.md](roadmap.md#current-implementation-status) do not imply a live
+deployment. This document describes the implemented structure, boundaries,
+and constraints.
 
 **Product principle:** One AI brain. One persistent memory. Multiple specialist
-agents. One continuous task engine. Accessible everywhere through a browser.
-Zero required device installations.
+agents. One continuous task engine. Browser-based access with no required device
+installation.
 
 ---
 
 ## 1. What JARVIS is — and is not
 
-JARVIS is a cloud-hosted personal AI operating assistant. The browser is the
-only user interface. All reasoning, memory, orchestration, and execution run on
-infrastructure the user does not install.
+JARVIS is a browser-based personal AI assistant. The web app calls a separate
+API and worker; local development uses Compose. Production deployment has not
+been provisioned. The browser is the user interface, and no device installation
+is required.
 
 JARVIS is **not**:
 
@@ -43,36 +46,29 @@ flowchart TB
         ipad["iPad Safari"]
     end
 
-    subgraph edge ["Edge"]
-        proxy["Reverse proxy + TLS<br/>not provisioned"]
-    end
-
-    subgraph app ["JARVIS cloud"]
+    subgraph app ["JARVIS services — local Compose; production not provisioned"]
         web["apps/web<br/>Next.js UI"]
         api["apps/api<br/>FastAPI"]
         worker["apps/worker<br/>task executor"]
-        subgraph data ["Data plane"]
+        subgraph data ["Configured local services"]
             pg[("PostgreSQL 16<br/>+ pgvector")]
-            redis[("Redis 7<br/>rate limiting + cache")]
-            s3[("S3-compatible<br/>object storage")]
+            redis[("Redis 7<br/>Compose dependency; no current app use")]
+            localstack[("LocalStack S3<br/>Compose scaffold; app does not call it")]
         end
     end
 
-    subgraph external ["External — only when the user connects them"]
-        llm["LLM providers<br/>OpenAI-compatible"]
-        speech["Speech providers<br/>STT / TTS"]
-        oauth["OAuth providers<br/>Google, Microsoft, GitHub…"]
+    subgraph external ["Implemented external services"]
+        llm["LLM provider interface<br/>OpenAI-compatible"]
+        google["Google OAuth<br/>Gmail profile and Calendar list reads"]
     end
 
-    mac & iphone & ipad -->|HTTPS / WSS| proxy
-    proxy --> web
-    proxy --> api
+    mac & iphone & ipad --> web
+    mac & iphone & ipad -->|REST + SSE| api
     web -->|REST + SSE| api
-    api --> pg & redis
-    worker --> pg & redis & s3
-    api -.->|provider interface| llm & speech
-    api -.->|OAuth 2.0| oauth
-    worker -.-> worker
+    api --> pg
+    worker --> pg
+    api -.->|when configured| llm
+    api -.->|OAuth 2.0; read-only operations| google
 ```
 
 The web app never talks to a database, a model provider, or an integration
@@ -115,15 +111,15 @@ No directory holds more than four files, excluding `.git`, `.venv`, `__pycache__
 | Auth | JWT access token + rotating refresh token | Short-lived credentials, revocable sessions |
 | Streaming | Server-Sent Events | Works through proxies; no socket state to recover |
 | Tasks | PostgreSQL durable queue (`FOR UPDATE SKIP LOCKED`) | Postgres is the source of truth; no separate queue to desync from it |
-| Vectors | pgvector | One database, transactional with the memories it indexes |
+| Vectors | pgvector extension | The memory embedding column exists but is not written or searched |
 
 ### Provider interfaces
 
-Model and speech providers sit behind interfaces in `apps/api/app/ai/`.
-Business logic names a capability (`complete`, `transcribe`, `synthesize`),
-never a vendor or a model. The concrete provider and model come from
-configuration. A missing credential degrades to an explicit "not configured"
-response — it never falls back to fabricated output.
+Model providers sit behind an interface in `apps/api/app/ai/`; the concrete
+provider and model come from configuration. Speech interfaces exist, but there
+is no server-side STT or TTS provider implementation. Voice capture and playback
+use browser Web Speech APIs. Missing model credentials produce an explicit "not
+configured" response rather than fabricated output.
 
 ```python
 class LanguageModel(Protocol):
@@ -141,43 +137,60 @@ chatbot. A task is a durable record, not an in-memory coroutine.
 
 ### State machine
 
+The shared task helper defines the legal transitions below. Task creation stores
+ordinary plans as `created` and high-risk plans as `waiting_for_approval`.
+
 ```mermaid
 stateDiagram-v2
-    [*] --> CREATED
-    CREATED --> UNDERSTANDING
-    UNDERSTANDING --> PLANNING
-    PLANNING --> WAITING_FOR_APPROVAL: high-risk step
-    PLANNING --> EXECUTING: all steps low/medium risk
-    WAITING_FOR_APPROVAL --> EXECUTING: approved
-    WAITING_FOR_APPROVAL --> CANCELLED: rejected
-    EXECUTING --> VERIFYING
-    VERIFYING --> COMPLETED
-    EXECUTING --> WAITING_FOR_USER: input needed
-    WAITING_FOR_USER --> EXECUTING
-    EXECUTING --> PAUSED
-    PAUSED --> EXECUTING
-    UNDERSTANDING --> FAILED
-    PLANNING --> FAILED
-    EXECUTING --> FAILED
-    FAILED --> REQUIRES_RETRY
-    REQUIRES_RETRY --> EXECUTING
-    CREATED --> CANCELLED
-    EXECUTING --> CANCELLED
+    [*] --> created: ordinary plan
+    [*] --> waiting_for_approval: high-risk plan
+    created --> understanding
+    created --> cancelled
+    understanding --> planning
+    understanding --> failed
+    understanding --> cancelled
+    planning --> waiting_for_approval
+    planning --> executing
+    planning --> failed
+    planning --> cancelled
+    waiting_for_approval --> executing
+    waiting_for_approval --> cancelled
+    executing --> verifying
+    executing --> waiting_for_user
+    executing --> paused
+    executing --> failed
+    executing --> cancelled
+    waiting_for_user --> executing
+    waiting_for_user --> cancelled
+    paused --> executing
+    paused --> cancelled
+    verifying --> completed
+    verifying --> failed
+    failed --> requires_retry
+    requires_retry --> executing
+    requires_retry --> cancelled
 ```
 
-Every transition is written to `task_events` in the same transaction as the
-state change. There is no state change without a recorded event, and no event
-without a state change.
+Application transition paths insert `task_events` in the same transaction as
+the state change. Database permissions do not enforce `task_events` as
+append-only.
+
+A high-risk plan is saved with its steps but no job. There is no approve/reject
+endpoint. The worker refuses `waiting_for_approval` tasks with
+`approval_required`; the task cancel route returns HTTP 409 (`not_cancellable`,
+"No active job to cancel") because no job exists. Although the shared helper
+allows transitions from `waiting_for_approval` to `executing` or `cancelled`,
+no user-facing approval or rejection flow invokes them.
 
 ### Durability rules
 
-1. **PostgreSQL holds the truth.** Task state, step state, checkpoints, and
-   the job queue itself live in Postgres. Workers claim jobs with
+1. **PostgreSQL holds the truth.** Task state, step state, and the job queue
+   itself live in Postgres. Workers claim jobs with
    `FOR UPDATE SKIP LOCKED`, using lease tokens, fencing, and heartbeats for
    recovery. There is no separate queue; Redis is not used for task dispatch.
-2. **A worker crash loses nothing.** On startup a worker reclaims tasks stuck
-   in `EXECUTING` past their heartbeat timeout and requeues them. Steps are
-   idempotent, keyed by `(task_id, step_index, attempt)`.
+2. **Expired leases are recoverable.** The worker reaps expired jobs according
+   to their attempt policy. Completed steps are skipped on resume; a running
+   step may be retried, so execution does not guarantee exactly-once side effects.
 3. **Closing the browser changes nothing.** The browser is a subscriber to task
    events, not a participant in execution.
 4. **Restart survival is tested**, not assumed. The integration test kills the
@@ -185,71 +198,57 @@ without a state change.
 
 ### Approval gating
 
-Each agent action carries a risk class (see
-[security model](../security/SECURITY.md)). A plan containing any `HIGH` risk
-step transitions to `WAITING_FOR_APPROVAL` and does not proceed until the user
-approves that specific step. Approval is bound to the exact action payload, so
-a step cannot be swapped after approval.
+The supervisor marks high-risk plans as requiring approval. The task service
+persists these plans in `waiting_for_approval` without inserting a job. The
+approval decision flow is not implemented: there is no approve/reject endpoint,
+and the worker rejects `waiting_for_approval` with `approval_required`. No
+payload hash or exact-action approval binding is implemented. See the
+[security model](../security/SECURITY.md) for the risk classification.
 
 ---
 
 ## 6. Agent architecture
 
-A supervisor is the only component that plans. Specialist agents execute one
-assigned step and return structured output. They cannot plan, delegate, or call
-tools outside their declared permissions.
+The supervisor plans tasks into ordered steps. The worker checks permissions
+and executes each step through an available handler; step results are stored in
+the task result. Agent registry entries describe capabilities but do not
+implement them or guarantee that a handler exists.
 
 ```mermaid
 flowchart LR
-    user["User instruction"] --> orch["Supervisor / orchestrator"]
-    orch --> plan["Plan: ordered steps"]
-    plan --> gate{"Any HIGH risk step?"}
-    gate -->|yes| approval["WAITING_FOR_APPROVAL"]
-    gate -->|no| exec["Execute steps"]
-    approval -->|approved| exec
-    exec --> a1["Personal"]
-    exec --> a2["Email"]
-    exec --> a3["Calendar"]
-    exec --> a4["Research"]
-    exec --> a5["Developer"]
-    exec --> a6["Document"]
-    exec --> a7["Finance"]
-    exec --> a8["Automation"]
-    a1 & a2 & a3 & a4 & a5 & a6 & a7 & a8 --> verify["Verify + combine"]
-    verify --> result["Result + memory update"]
+    user["User instruction"] --> orch["Supervisor"]
+    orch --> plan["Ordered task steps"]
+    plan --> gate{"High-risk step?"}
+    gate -->|yes| approval["waiting_for_approval<br/>saved; no job or decision endpoint"]
+    gate -->|no| job["PostgreSQL job"]
+    job --> worker["Worker"]
+    worker --> handlers["Execute steps through available handlers"]
+    handlers --> result["Stored task result"]
 ```
 
-Every agent is a data record, not a class hierarchy: an ID, a description, a
-capability list, a permission list, input/output schemas, a timeout, and a
-retry policy. Adding an agent means adding a record and a handler, not editing
-the orchestrator.
+Every agent is a data record, not a class hierarchy: an ID, name, description,
+capabilities, permissions, timeout, retry count, and risk ceiling. Adding a
+registry entry does not implement a worker handler.
 
-Phase 1 registers 18 agents and their contracts, seeded into the `agents` and
-`agent_capabilities` tables by migration `0001` (diagram above shows the
-eight most-used ones). It does not yet give them real tools — an agent with no
-connected integration reports that fact instead of inventing a result.
+Migration `0001` seeds 18 agent contracts into `agents` and
+`agent_capabilities` (the diagram shows eight registry entries). Registry
+entries do not mean every declared capability is implemented. Current Google
+integration steps read Gmail profile totals and the Calendar list only.
 
 ---
 
 ## 7. Memory
 
-Ten categories: personal profile, communication preferences, professional
-context, current projects, long-term goals, technical knowledge, decisions,
-recurring tasks, conversation summaries, user-defined instructions.
+The memory API supports these categories: `profile`, `preferences`, `work`,
+`projects`, `goals`, `knowledge`, `decisions`, `routines`, `summaries`, and
+`instructions`. `GET /api/v1/memory` searches content with SQL `ILIKE` or matches
+an exact category; it returns at most 100 non-deleted rows, ordered by
+`updated_at` descending. There is no semantic retrieval or embedding search.
 
-Two retrieval paths, merged by a weighted score:
-
-- **Keyword** — PostgreSQL full-text search (`tsvector`), exact and fast.
-- **Semantic** — pgvector cosine distance over embeddings.
-
-Ranking combines semantic similarity, keyword rank, recency decay, and an
-explicit importance weight the user can set. Every memory stores its source
-(which conversation, which message) and a privacy class. A memory tagged
-`sensitive` is excluded from any agent whose permissions do not include it.
-
-**Nothing becomes a memory automatically.** The orchestrator may *propose* a
-memory; only the user, or an explicit user instruction to remember something,
-commits it. Unverified inferences are never persisted as fact.
+Conversation context includes up to 10 active, non-deleted memories, ordered by
+`updated_at` descending. It does not filter on `privacy_class`, so memories
+tagged `sensitive` can be sent to the model when they fall within that limit.
+Memory CRUD requires a user action; there is no memory proposal-and-commit flow.
 
 ---
 
@@ -260,37 +259,38 @@ documented here so they are never quietly "implemented" by faking them.
 
 | Requested capability | Reality | What JARVIS does instead |
 |---|---|---|
-| Always-on wake word | A browser tab cannot listen permanently, and iOS suspends background tabs | Push-to-talk microphone button; optional Siri Shortcut that opens JARVIS with a prompt |
-| Control of native Mac apps | No local process exists to drive them | Cloud browser automation and official APIs only |
-| Local filesystem access | The browser sandbox forbids it | Cloud document storage and connected drives (Drive, OneDrive) |
-| Background work on the device | Impossible without an install | All background work runs in the cloud worker |
-| Reliable push on iOS Safari | Web Push on iOS requires the site to be added to the Home Screen, which is a user action we cannot require | In-app notifications always; web push where the browser grants it; email as the guaranteed channel |
-| Unrestricted computer use | Would require a local agent | Isolated cloud browser with per-session limits, timeouts, and an audit log |
+| Always-on wake word | No wake-word listener is implemented; browser speech capture uses the open page | Browser push-to-talk requires an explicit user action |
+| Control of native Mac apps | No local process or browser automation is implemented | No native app control is available |
+| Local filesystem access | No local filesystem integration or connected-drive integration is implemented | No file access outside the app's current API capabilities |
+| Background work on the device | No device installation or device-side worker exists | Queued tasks run in the separate worker process when the services are running |
+| Push notifications and email | No Web Push, APNs/FCM, or email delivery is implemented | Notification records can be fetched in-app; browser notifications require permission and are not guaranteed |
+| Unrestricted computer use | No local computer control or isolated cloud browser is implemented | Only implemented task handlers and integrations are available |
 
 ---
 
 ## 9. Cross-device continuity
 
-All state that matters lives in PostgreSQL, keyed by `user_id`: conversations,
-messages, memories, tasks, approvals, notifications, preferences. The browser
-holds only the access token (in memory) and the refresh token (HttpOnly,
-Secure, SameSite cookie).
+Conversations, messages, memories, tasks, notifications, and preferences are
+stored in PostgreSQL and scoped by user. Sync events support pull-based cursor
+replay; there is no local replica.
 
-Opening JARVIS on a second device is a login plus a fetch. There is no sync
-protocol because there is no local replica.
+The web app stores the access token in `sessionStorage` and sends it as a Bearer
+token. The refresh token is an HttpOnly cookie. Although the API has a refresh
+endpoint, the web client does not call it or retry failed requests with a new
+access token. A second device requires login; automatic refresh is not
+implemented.
 
 ---
 
 ## 10. Deployment
 
-`infra/compose/docker-compose.yml` runs PostgreSQL, Redis, LocalStack, a one-shot migrate
-service, the API, the worker, and the web app. There is no reverse proxy in
-Compose. The same images deploy to a single host without code changes; only
-environment variables differ.
-
-Production expects managed PostgreSQL and S3-compatible object storage. Redis is
-an auxiliary cache and rate-limit store, not the task queue. Terraform is not
-provisioned; infrastructure waits until the application justifies it.
+`infra/compose/docker-compose.yml` runs PostgreSQL, Redis, LocalStack, a
+one-shot migration service, the API, the worker, and the web app. There is no
+reverse proxy in Compose. The application uses PostgreSQL for task data and the
+job queue. LocalStack is an S3 scaffold that the application does not call;
+Redis is not currently used by the application; task/command write limits and
+login throttling are in-process.
+Production infrastructure is not provisioned.
 
 ---
 
@@ -301,12 +301,12 @@ provisioned; infrastructure waits until the application justifies it.
 | 1 | Architecture, monorepo, database, auth, health, task state machine | Implemented |
 | 2 | User management, sessions, preferences | Implemented |
 | 3 | Conversations and model provider integration | Implemented |
-| 4 | Persistent memory and retrieval | Implemented |
+| 4 | Memory CRUD and keyword search | Partial; no semantic retrieval or proposal-and-commit flow |
 | 5 | Agent orchestration | Implemented |
 | 6 | Durable task execution and worker | Implemented |
-| 7 | Voice interface | Implemented |
-| 8 | External integrations | Implemented |
-| 9 | Notifications and automations | Implemented |
+| 7 | Browser voice interface | Implemented; no server-side STT/TTS provider |
+| 8 | Gmail and Google Calendar OAuth | Implemented for profile-total and calendar-list reads only |
+| 9 | Notifications and automations | Implemented; in-app only |
 | 10 | Security hardening | Implemented |
 | 11 | Observability | Implemented |
 | 12 | Production deployment | Not started |
@@ -320,16 +320,19 @@ provisioned; infrastructure waits until the application justifies it.
 1. The user posts a message to `/api/v1/conversations/{id}/stream`.
 2. The message is stored before any model call, so a provider failure never
    loses what the user typed.
-3. `build_context` assembles the system prompt, preferences, up to ten active
-   memories, the conversation summary, and recent messages, dropping the oldest
-   until the result fits a 6,000-token budget.
+3. `build_context` assembles the system prompt, preferences, up to ten active,
+   non-deleted memories ordered by `updated_at`, the conversation summary, and
+   recent messages. It does not filter memories by `privacy_class`; sensitive
+   memories can therefore be included. Oldest history is dropped to fit the
+   approximate 6,000-token budget.
 4. The provider streams deltas. Each becomes an SSE `text.delta` event.
 5. The completed text is stored as an assistant message. If the provider is
    not configured, the stored message says so and names the error code.
 
 A non-streaming variant lives at `POST /conversations/{id}/messages`. It asks
-the supervisor to plan first and, when the plan needs execution and no
-approval, creates a task through the existing `Task` and `TaskStep` models.
+the supervisor to plan first and creates a task when execution is required.
+High-risk plans are persisted as `waiting_for_approval` with steps but no job;
+there is no approval endpoint.
 
 ### Provider
 
@@ -346,10 +349,11 @@ deploy, publish, or transfer. The model cannot add an agent or lower a risk.
 
 ### Limitations
 
-- A plan that needs execution is persisted as a task and a `jobs` row. The
-  worker claims it with `FOR UPDATE SKIP LOCKED`. An API restart does not lose
-  that work. A streamed reply that never becomes a task is still stored only
-  after the final event.
+- A plan that needs execution is persisted as a task. Ordinary plans receive a
+  `jobs` row, which the worker claims with `FOR UPDATE SKIP LOCKED`; high-risk
+  plans remain `waiting_for_approval` without a job. An API restart does not
+  lose queued work. A streamed reply that never becomes a task is still stored
+  only after the final event.
 - A client that disconnects before the final event loses the reply. The user's
   message is already stored.
 - Task creation commits separately from the reply. A crash between the two can
@@ -372,9 +376,11 @@ The web client has a hold-to-talk control and an English/Hindi switch. Holding
 the control starts the browser's speech recognition in the locale returned by
 `GET /api/v1/voice/session`. Releasing it stops listening. A finished transcript
 is submitted as a voice command to `POST /api/v1/assistant/commands` with
-`source: web` and the open conversation id. That is the same planner and the
-same queue as Siri and Google Assistant. Typed messages stay on the conversation
-stream and are not spoken back. If the voice submit fails, the transcript is
+`source: web` and the open conversation id. That is the same planner and task
+queue used by the command gateway. The accepted `source: siri` and
+`source: google_assistant` values are attribution labels, not native iOS or
+Android invocations. Typed messages stay on the conversation stream and are not
+spoken back. If the voice submit fails, the transcript is
 put back in the message field so it can be sent as text.
 
 `POST /api/v1/voice/speak` shortens a finished reply to the 240-character voice
@@ -392,9 +398,9 @@ not English or Hindi is rejected with 422 before planning.
 ### What is not implemented
 
 `STT_PROVIDER` and `TTS_PROVIDER` are accepted as configuration and reported in
-health. No vendor implementation is wired, because no credential is configured
-and none was invented. A future provider implements `transcribe` and
-`synthesize` behind `app/ai/speech.py` and does not change the command gateway.
+health, but no server-side provider implementation exists. The browser uses
+Web Speech APIs for recognition and synthesis; the API does not receive audio
+or generate speech.
 
 Wake-word activation is not possible under the zero-install constraint and is
 not built. No microphone permission is requested until the user holds the
@@ -420,32 +426,44 @@ sequenceDiagram
     User->>Web: Instruction (text or voice)
     Web->>API: POST /api/v1/assistant/commands (Bearer)
     API->>API: Validate token, resolve user
-    API->>DB: Insert task, task_event, and jobs row
-    API-->>Web: 202 Accepted
-    W->>DB: Claim with FOR UPDATE SKIP LOCKED
-    W->>DB: Heartbeat the lease, run the step
-    W->>DB: Transition to completed, write the result
-    Web->>API: GET /api/v1/tasks/{id}
-    API-->>Web: completed
+    API->>API: Plan command
+    alt plan requires execution
+        API->>DB: Insert task, steps, and task_event
+        alt ordinary executable plan
+            API->>DB: Insert jobs row
+        else high-risk plan
+            Note over API,DB: waiting_for_approval; no job is inserted
+        end
+    else no execution required
+        Note over API,DB: No task or job is created
+    end
+    API-->>Web: Command acknowledgement (202)
+    opt task exists
+        Web->>API: GET /api/v1/tasks/{id}
+        API-->>Web: Current task status
+        opt queued job exists
+            W->>DB: Claim with FOR UPDATE SKIP LOCKED
+            W->>DB: Heartbeat the lease, run the step
+            W->>DB: Persist task transition and result
+        end
+    end
 ```
 
-Closing the browser drops the SSE connection only. The worker keeps running
-because it never depended on the connection.
+Closing the browser drops the SSE connection only. A queued job is independent
+of that connection; a `waiting_for_approval` task has no job to run.
 
 ### Data isolation
 
 ```mermaid
 flowchart TB
     req["Authenticated request"] --> mw["Auth middleware<br/>resolves user_id from token"]
-    mw --> repo["Repository layer<br/>every query filters on user_id"]
-    repo --> db[("PostgreSQL<br/>row-level policies")]
+    mw --> routes["API route handlers<br/>ownership checks and scoped queries"]
+    routes --> db[("PostgreSQL<br/>row-level security policies")]
     db --> resp["Response scoped to caller"]
-
-    other["Any query without user_id"] -.->|rejected by construction| repo
 ```
 
-Isolation is enforced twice: the repository layer requires a `user_id`
-argument and will not construct a query without one, and PostgreSQL row-level
-security rejects rows the session is not permitted to see. Either control
-failing closed is sufficient; both are present so one regression is not enough
-to leak data.
+API handlers perform ownership checks and scope tenant queries. Migration
+`0009` applies row-level security policies to tenant-owned tables while the
+application connects as a non-owner role. The worker GUC is accepted only by
+the designated worker-access policies. RLS controls row visibility; it does not
+provide a repository layer or enforce append-only records.

@@ -3,13 +3,15 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-Siri and Google Assistant are interaction surfaces. They are not reasoning
-providers. Every command, whatever its source, reaches the same planner
-(`app/ai/supervisor.py`), the same agent registry, and the same durable queue.
+The API accepts `siri` and `google_assistant` as command source attribution
+labels. No native iOS or Android app invokes this endpoint; those labels do not
+represent installed assistant integrations. Commands submitted to the endpoint
+reach the same planner (`app/ai/supervisor.py`), agent registry, and durable
+queue when the plan is executable.
 
 ## What is implemented
 
-`POST /api/v1/assistant/commands` accepts one contract from every surface:
+`POST /api/v1/assistant/commands` accepts this source-tagged request contract:
 
 ```json
 {
@@ -34,13 +36,13 @@ header replays the original response instead of creating a second task.
 Long work is not run inline. An executable plan is persisted and queued through
 the existing job table, and the caller receives `202` immediately. A high-risk
 plan is stored as `waiting_for_approval` and is not queued. Voice invocation
-does not bypass the approval gate.
+does not change that waiting state.
 
-When no model provider is configured, a conversational request from `siri` or
-`google_assistant` is handed back to that device assistant. The response status
-is `handed_off`, `handoff` is true, and `device_assistant` names the source.
-The backend does not invent an answer and does not call Siri or Google
-Assistant. An executable keyword plan still queues. `web`, `desktop`, and `api`
+When no model provider is configured, a conversational request tagged
+`siri` or `google_assistant` receives a handoff response naming that source.
+The response status is `handed_off`, `handoff` is true, and `device_assistant`
+names the source. The backend does not invoke a native assistant or invent an
+answer. An executable keyword plan still queues. `web`, `desktop`, and `api`
 have no on-device assistant, so those conversational requests stay on the
 existing unconfigured path. Conversation messages accept the same optional
 `source` and follow the same rule.

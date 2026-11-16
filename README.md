@@ -11,16 +11,29 @@ Nothing is installed on the user's devices.
 
 ## Run
 
+Copy the environment template to the repository-root `.env`, then set its
+values. Generate a strong random `JWT_SECRET` with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"` and set it
+explicitly before production. The production guard checks only that the secret
+has at least 32 characters; it does not check strength or uniqueness, and an
+unset variable does not fail closed. Never commit `.env` or populated secret
+values.
+
 ```bash
-docker compose --project-directory . -f infra/compose/docker-compose.yml up -d
+cp config/env/.env.example .env
+docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis
 python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -e . --group dev
 set -a
 . ./.env
 set +a
 .venv/bin/alembic -c apps/api/alembic.ini upgrade head
 .venv/bin/uvicorn app.main:app --app-dir apps/api --port 8000
 ```
+
+The Compose command starts only PostgreSQL and Redis. Run the API, worker, and
+web app as host processes as shown here; starting all Compose services as well
+would bind the same API and web ports.
 
 In a second terminal, start the worker. Tasks stay queued until it is running:
 
@@ -43,8 +56,10 @@ are often already taken.
 
 ## Run on local Kubernetes
 
-Requires `kind` and `kubectl`. Build the images first (`docker compose
---project-directory . -f infra/compose/docker-compose.yml build`), then:
+Requires `kind` and `kubectl`. The local cluster uses HTTP and does not
+configure TLS. Review [Kubernetes credential handling](docs/developer/INSTALLATION.md#kubernetes-credentials)
+before applying Secrets; never commit populated secret values. Build the images
+first (`docker compose --project-directory . -f infra/compose/docker-compose.yml build`), then:
 
 ```bash
 kind create cluster --name jarvis --config infra/k8s/base/kind-config.yaml
@@ -68,7 +83,7 @@ verification URLs, curl commands, and a disposable test account are in
 
 ## Configure a model
 
-Copy `config/env/.env.example` to `.env` with `cp config/env/.env.example .env`, then set `OPENAI_API_KEY`. Without it the API
+Set `OPENAI_API_KEY` in the root `.env` created above. Without it the API
 starts normally, `/api/v1/health` reports `"configured": false`, and sending a
 message returns 503 `ai_not_configured`. JARVIS does not invent replies.
 

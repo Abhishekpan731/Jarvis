@@ -104,7 +104,13 @@ Registered prefixes, from `app.main` and each router package:
 `kind` web origin `http://localhost:3001` is not in that list. Authenticated
 routes expect `Authorization: Bearer` with the user access token. The refresh
 token is the HttpOnly cookie `jarvis_refresh`, path `/api/v1/auth`,
-`SameSite=Lax`. `secure` is set only when `APP_ENV=production`.
+`SameSite=Lax`. `secure` is set only when `APP_ENV=production`. The web
+client does not call the refresh endpoint or automatically renew access
+tokens; closing the tab clears its `sessionStorage` access token. The refresh
+cookie does not restore the browser session automatically.
+
+The `/api/v1/health` endpoint returns `status`, model-provider status, and
+speech status; it does not check database connectivity or worker health.
 
 Full endpoint-by-endpoint documentation: [api/conventions.md](../api/conventions.md)
 and [api/conversations.md](../api/conversations.md). FastAPI also generates
@@ -115,6 +121,42 @@ The admin route (`app.observe`) requires the `ADMIN_TOKEN` environment
 variable to be set and the same value sent as an `Authorization: Bearer`
 header — a signed-in user's JWT does not open it. See
 [INSTALLATION.md](INSTALLATION.md#optional--operator-admin-view).
+
+A typed message and a held-microphone command do not share a route:
+
+```mermaid
+flowchart TD
+    typed["Typed message"] --> stream["POST /api/v1/conversations/{id}/stream"]
+    voice["Hold to talk"] --> commands["POST /api/v1/assistant/commands"]
+    stream --> streamModel{"OPENAI_API_KEY set?"}
+    streamModel -->|yes| reply["Stream the model reply"]
+    streamModel -->|"no, source siri or google_assistant"| streamHandoff["SSE assistant.handoff (advisory only)"]
+    streamModel -->|"no, source web, desktop, or api"| streamClosed["SSE error ai_not_configured"]
+    commands --> plan["plan_request falls back to keyword matching"]
+    plan --> executable{"Plan requires execution?"}
+    executable -->|yes| approval{"Requires approval?"}
+    approval -->|yes| waiting["Record waiting_for_approval; no job"]
+    approval -->|no| queue["Record task and enqueue job"]
+    executable -->|"no, source siri or google_assistant, no model"| commandHandoff["JSON handoff (advisory only)"]
+    executable -->|"no, otherwise"| noted["Noted, nothing queued"]
+    queue --> worker["Worker claims the job"]
+```
+
+The web client sends voice with `source: "web"` and `input_type: "voice"`.
+That source has no on-device assistant. A typed stream with that source emits
+an SSE `error` event named `ai_not_configured`; it does not return HTTP 503.
+The non-streaming message route does return HTTP 503 with that code. `siri`
+and `google_assistant` are API source labels, not native integrations. A
+handoff response only advises the caller to ask the named assistant; JARVIS
+does not invoke it. A command that names a registered agent still queues
+through the keyword fallback when no model is configured. Plans requiring
+approval are persisted as `waiting_for_approval` without a job; the current API
+has no approval or rejection endpoint, so those tasks do not execute.
+
+The API exposes memory and device registration/list/revocation endpoints, but
+the current web UI has no user-facing memory CRUD or device-management
+controls. The memory `sensitive` privacy label does not keep that memory out of
+model context; do not treat it as a protection boundary.
 
 ## `packages/shared/jarvis_shared`
 
@@ -234,7 +276,7 @@ Agents are data, not classes — see
 
 Tests are organized by feature area under `tests/`: `assistant`, `integrations`,
 `jobs`, `operations`, `security`. Auth and conversation tests need PostgreSQL
-running (`docker compose up -d`), because the suite exercises row-level
+running (`docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis`), because the suite exercises row-level
 security and cross-tenant isolation against a real database rather than
 mocking it — those are exactly the properties a mock would hide a regression
 in.
@@ -270,7 +312,7 @@ Run a single feature area:
 - **Risk classification is enforced in code, not in a prompt.** If you add an
   action that should require approval (send, delete, pay, purchase, deploy,
   publish, transfer), add the keyword check in `app.ai.supervisor.validate_plan`
-  — see [SECURITY.md §4](../security/SECURITY.md#4-action-risk-classification).
+  — see [SECURITY.md §3](../security/SECURITY.md#3-authorization-and-approval).
 
 ## Where to go next
 

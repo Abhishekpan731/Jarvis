@@ -5,32 +5,37 @@
 
 Each phase ends with working, tested software and updated documentation. A
 phase is not done because code was written; it is done because its tests pass.
+The verification column records checks against this checkout; passing tests or
+code review do not establish that a feature is available in a live deployment.
 
 ## Current implementation status
 
 Audited 2026-11-15 against the working tree, not against earlier notes. A row
-is verified only when a command was run and its output observed.
+is verified only when a command was run and its output observed. Verification
+is evidence about this checkout and the stated test environment, not proof of a
+live or production deployment.
 
 | Feature         | Existing implementation                                                                                                                                                                                                                                                        | Verified                                                                                                                | Remaining work                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Authentication  | Register, login, logout, refresh with rotation and family revocation, session lookup, password change, soft account deletion. Argon2id, HttpOnly refresh cookie, in-process login throttle. Password change and deletion revoke every session for the account.                 | Yes. `tests/security/test_auth.py` and `tests/security/test_review_regressions.py`, against PostgreSQL.                                   | Redis-backed rate limiting. Hard deletion of user data.                                                       |
+| Authentication  | Register, login, logout, API refresh with rotation and family revocation, session lookup, password change, soft account deletion. Argon2id, HttpOnly refresh cookie, in-process login throttle. Password change and deletion revoke every session for the account. The web client does not call refresh or retry requests. | Yes. `tests/security/test_auth.py` and `tests/security/test_review_regressions.py`, against PostgreSQL.                                   | Web-client refresh/retry flow. Redis-backed rate limiting. Hard deletion of user data.                                                       |
 | Database        | PostgreSQL 16 with pgvector; migrations `0001` through `0009` are checked in. `0009` creates the non-owner `jarvis_app` runtime role, forces RLS on tenant-owned tables, and adds `WITH CHECK` policies.                                                                 | `tests/security/test_security.py` defines coverage for fail-closed RLS, cross-tenant reads of memories/devices, worker-GUC SELECT visibility of a foreign job, and rejection of a cross-tenant task insert. This review did not verify the live DB version; the prior row recorded `0005`. | Verify deployment DBs applied `0009`; expand coverage for joined-table and non-queue worker-GUC boundaries. |
 | Agents          | 18 agents in `jarvis_shared.agents` and seeded by migration `0001`.                                                                                                                                                                                                            | Yes. `select count(*) from agents` returns 18. Registry import returns 18.                                              | No idempotent re-seed command. The migration inserts once; a second run is a no-op because Alembic tracks it. |
-| Task execution  | Durable. `app.jobs` queues work with lease tokens and fencing; `apps/worker/jarvis_worker/loop.py` claims with `FOR UPDATE SKIP LOCKED`, heartbeats, and reaps expired leases.                                                                                              | Yes. `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`.                                                  | No CI runs these automatically.                                                                               |
+| Task execution  | Durable PostgreSQL queue. The task helper defines legal transitions; the worker claims queued jobs with leases and fencing. High-risk tasks are saved as `waiting_for_approval` without a job. No approve/reject endpoint exists; the worker rejects that status, and cancellation returns 409 when no active job exists. | Yes. `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`.                                                  | Implement approval decisions and a supported cancellation path for waiting tasks (the current route returns 409). No CI runs these automatically.                                                                               |
 | Frontend        | Next.js app in `apps/web`: sign in, register, conversation list, streaming chat, stop control, hold-to-talk, English/Hindi switch.                                                                                                                                             | Partially. `tsc` not re-run this phase. No browser test was run.                                                        | Rename and delete exist in the API client but not in the UI. Microphone use is untested on a device.          |
 | AI integration  | Provider interface, OpenAI implementation, factory that reports unconfigured instead of inventing a reply.                                                                                                                                                                     | Partially. Missing-key path verified: health reports `configured: false` and messaging returns 503 `ai_not_configured`. | No live call was made. No `OPENAI_API_KEY` is set.                                                            |
-| Voice           | Browser push-to-talk, English and Hindi, text fallback. A transcript is submitted to `POST /api/v1/assistant/commands` (`source: web`, `input_type: voice`). Unsupported voice locales are rejected. Typed chat is not spoken. No wake word. Server STT/TTS stay unconfigured. | Yes. `tests/integrations/test_voice.py`, including owner isolation on an existing conversation. Browser capture was not exercised.   | A speech vendor, once a credential exists.                                                                    |
+| Voice           | Browser Web Speech APIs provide push-to-talk, English and Hindi, and text fallback. A transcript is submitted to `POST /api/v1/assistant/commands` (`source: web`, `input_type: voice`). Unsupported voice locales are rejected. Typed chat is not spoken. No wake word or server-side STT/TTS provider implementation. | Yes. `tests/integrations/test_voice.py`, including owner isolation on an existing conversation. Browser capture was not exercised.   | A speech vendor, once a credential exists.                                                                    |
 | Supervisor      | Plans a request, validates agents against the registry, forces approval on high-risk actions. One planner serves every source.                                                                                                                                                | Yes. `tests/assistant/test_supervisor.py`, 4 tests.                                                                               | Routing uses the model only when one is configured. Without a key it falls back to keyword matching.          |
 | Command gateway | `POST /api/v1/assistant/commands` accepts a source-tagged contract (`siri`, `google_assistant`, `web`, `desktop`, `api`), normalizes it, and routes it through the shared planner. A device id is attribution, never authentication.                                           | Yes. `tests/assistant/test_assistant.py`, 4 tests, against PostgreSQL.                                                            | Not exercised from a physical Siri or Google Assistant device.                                                |
 | Devices         | `devices` table with registration, per-device revocation, and last-seen tracking. Revoking a device blocks further commands attributed to it.                                                                                                                                  | Yes. `tests/assistant/test_assistant.py`.                                                                                         | No push transport (APNs/FCM). Clients poll `/api/v1/sync`.                                                    |
 | Sync            | Durable `sync_events` log with cursor replay at `GET /api/v1/sync`. Scoped per user; idempotency rows are excluded from the feed.                                                                                                                                              | Yes. `tests/assistant/test_assistant.py` covers replay and cross-account isolation.                                               | No live SSE push. Replay is pull-based.                                                                       |
 | Memory          | Table, CRUD API, keyword search, privacy class, active flag. Updates re-validate the privacy class.                                                                                                                                                                            | No. Endpoints exist; no test covers them.                                                                               | No embeddings are generated. The `embedding` column is empty.                                                 |
 | Streaming       | SSE endpoint emitting `response.started`, `text.delta`, `response.completed`, `error`.                                                                                                                                                                                         | No. Code reviewed, not exercised against a provider.                                                                    | Needs a configured provider to verify end to end.                                                             |
-| Integrations    | Gmail and Google Calendar connection flow with PKCE, single-use state, and Fernet ciphertext. The web app posts the callback; the code is not accepted on the API query string. A missing connection is not queued, and a worker does not invent a read.                       | Yes. `tests/integrations/test_integrations.py` and the email-step case in `tests/jobs/test_worker_recovery.py`. No Google call was made.  | No `GOOGLE_CLIENT_ID` is set. Reads are profile and calendar-list only. Sending mail is not granted.          |
+| Integrations    | Gmail and Google Calendar OAuth connection flow with PKCE, single-use state, and Fernet ciphertext. Gmail reads the profile message total; Calendar reads the calendar list. No mail content, mail sending, or calendar writes are implemented. | Yes. `tests/integrations/test_integrations.py` and the email-step case in `tests/jobs/test_worker_recovery.py`. No live Google call was made.  | Configure a Google client to test live reads. No `GOOGLE_CLIENT_ID` is set.          |
 
 ### What is explicitly not done
 
-- Semantic memory retrieval. The column exists; nothing writes it.
+- Semantic memory retrieval. The column exists; nothing writes it. Memory context can include active sensitive-tagged memories; no proposal-and-commit workflow exists.
+- High-risk task approval decisions. Such tasks are stored without jobs; no approve/reject endpoint exists, and the worker refuses to run them.
 - Wake word and local device control. Impossible under the zero-install constraint.
 - Native Siri and Google Assistant invocation. Both require a native app to
   register intents; none is installed. See `docs/architecture/ASSISTANTS.md`.
@@ -39,16 +44,18 @@ is verified only when a command was run and its output observed.
 - A live Google connection. No client id or secret is configured, so no mailbox
   or calendar was read.
 
-## Phase 1 — Foundation (current)
+## Phase 1 — Foundation (complete)
 
 Monorepo, configuration, structured logging, PostgreSQL with migrations, the
 identity tables, authentication (register, login, refresh, logout), the task
 state machine with recorded transitions, agent registry, health endpoints, and
 the API skeleton the UI talks to.
 
-**Done when:** a user can register and log in, a task can be created and moved
-through every legal state transition with each one recorded, illegal
-transitions are rejected, and one user cannot read another's data.
+**Done when:** a user can register and log in; the shared task-state helper
+accepts legal transitions and rejects illegal ones; application state changes
+record `task_events`; and one user cannot read another's data. The API does not
+expose arbitrary state transitions, and high-risk approval decisions are not
+implemented.
 
 ## Phase 2 — User management
 
@@ -76,36 +83,36 @@ permissions, and combines results. First real agent behaviours: research
 ## Phase 6 — Durable execution (done)
 
 The worker process claims from a PostgreSQL job table with `FOR UPDATE SKIP
-LOCKED`, holds a lease it heartbeats, and reaps expired leases on restart.
-Cancellation and idempotency keys are in place. Covered by
+LOCKED`, holds a lease it heartbeats, and reaps expired leases according to the
+attempt policy. Cancellation and idempotency keys are in place. Covered by
 `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`. The queue is
 PostgreSQL, not Redis; Redis remains available for a future rate limiter.
 
 ## Phase 7 — Voice (done, browser path)
 
-Push-to-talk in the web client, English and Hindi, text fallback when the
-browser cannot capture, and a provider boundary that reports unconfigured
-instead of inventing a transcript. No wake word. Server-side transcription and
-synthesis are not wired: no speech credential is configured. See
+Push-to-talk through browser Web Speech APIs, English and Hindi, and text
+fallback when the browser cannot capture. No wake word or server-side STT/TTS
+provider implementation exists. See
 `docs/architecture/ARCHITECTURE.md`. Covered by `tests/integrations/test_voice.py`.
 
 ## Phase 8 — Integrations
 
-Done for Gmail and Google Calendar, without a live Google call. The connection
-flow uses PKCE and a single-use state. Tokens are Fernet ciphertext. The web
-app posts the callback, so the authorization code is not on the API query
-string. A command that needs a missing connection is not queued, and a worker
-does not invent a mailbox or calendar read. No client id is configured, so this
-is not device-tested. Covered by `tests/integrations/test_integrations.py`.
+Implemented for Gmail and Google Calendar, without a live Google call. The
+connection flow uses PKCE and a single-use state. Tokens are Fernet ciphertext.
+The web app posts the callback, so the authorization code is not on the API
+query string. Gmail reads profile totals and Calendar reads the calendar list;
+there is no mail-content read, mail send, or calendar write. A command that
+needs a missing connection is not queued, and a worker does not invent a read.
+No client id is configured, so this is not live-tested. Covered by
+`tests/integrations/test_integrations.py`.
 
 ## Phase 9 — Notifications and automations (done, in-app only)
 
 A signed-in user pulls notification rows. The worker writes a daily briefing
 from that user's open tasks, and a daily reminder the user wrote, once per
 local day. The web client can show an unread row with the browser Notification
-API after the user grants permission. It does not push to a device, and it does
-not send email: no mail credential is configured, and the API reports
-`email_configured: false`. Covered by `tests/operations/test_notifications.py`. Not
+API after the user grants permission. It does not push to a device or implement
+email delivery. Covered by `tests/operations/test_notifications.py`. Not
 device-tested.
 
 ## Phase 10 — Security hardening

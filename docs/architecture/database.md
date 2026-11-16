@@ -94,7 +94,9 @@ added in `0003`), `title`, `instruction`, `status`, `result`, `error`,
 `(task_id, position)`. No `user_id`; tenancy is the parent task.
 
 **task_events** — `id`, `task_id`, `from_status`, `to_status`, `reason`,
-`actor`, `created_at`. Append-only. No `user_id`.
+`actor`, `created_at`. Application transition paths insert events, but
+append-only behavior is not database-enforced: migration `0009` grants the
+runtime role `UPDATE` and `DELETE`. No `user_id`.
 
 **jobs** — the durable queue. `id`, `user_id`, `task_id`, `job_type`
 (`task_execution` only), `payload`, `status`, `priority`, `attempt_count`,
@@ -130,8 +132,9 @@ Ciphertext only; the key is not in the database.
 cron expression.
 
 **audit_logs** — `id`, `user_id`, `actor`, `action`, `target_type`,
-`target_id`, `metadata` (jsonb), `created_at`. No `ip_address`. No RLS. The
-application role can insert and select.
+`target_id`, `metadata` (jsonb), `created_at`. No `ip_address`. No RLS.
+Migration `0009` grants the runtime role `UPDATE` and `DELETE`, so append-only
+behavior is not enforced by database permissions.
 
 **model_usage** — `id`, `user_id`, `task_id`, `provider`, `model`,
 `input_tokens`, `output_tokens`, `estimated_cost_usd`, `created_at`. No prompt
@@ -169,7 +172,8 @@ when that owner can be read. The worker predicate applies only to `jobs`,
 `users`, `sessions`, `user_preferences`, `agents`, `agent_capabilities`,
 `audit_logs`, and `model_usage` have no RLS. `task_steps` and `task_events`
 are visible only when the parent task belongs to `app.user_id`, or when
-`app.worker` is `true`.
+`app.worker` is `true`. RLS controls row visibility, not whether permitted
+rows can be updated or deleted.
 
 Tables that do not exist: `conversation_summaries`, `memory_embeddings`,
 `projects`, `project_members`, `agent_executions`, `approvals`,

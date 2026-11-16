@@ -3,8 +3,8 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-Security boundaries are defined before features, so every later phase inherits
-them instead of retrofitting them.
+This document separates implemented controls from known gaps. Deployment
+configuration can add protections, but they are not assumed here.
 
 ## 1. Trust boundaries
 
@@ -19,102 +19,117 @@ flowchart LR
     end
     subgraph trusted ["Trusted"]
         db[("PostgreSQL")]
-        secrets["Secret store"]
         worker["Worker"]
     end
 
     browser -->|Bearer token| api
-    ext -.->|retrieved content, never instructions| worker
+    ext -.->|retrieved content| worker
     api --> db
-    api --> secrets
     worker --> db
 ```
 
-Content retrieved from email, web pages, and documents is **data**, never
-instructions. It is wrapped and labelled as untrusted before it reaches a
-model, and it cannot alter tool permissions, approval requirements, or system
-policy. This is the prompt-injection boundary, and it is enforced in code
-rather than in a prompt.
+Retrieved content is treated as untrusted input. This does not replace
+server-side authorization or a completed approval workflow; see the approval
+limitations below.
 
 ## 2. Authentication
 
 | Token | Lifetime | Storage | Purpose |
 |---|---|---|---|
-| Access token (JWT, HS256) | 15 minutes | Memory only, never localStorage | Authorizes API calls |
-| Refresh token (opaque, random) | 30 days | HttpOnly, Secure, SameSite=Lax cookie | Issues new access tokens |
+| Access token (JWT, HS256) | 900 seconds | Browser `sessionStorage`; sent as a Bearer token | Authorizes API calls |
+| Refresh token (opaque, random) | 30 days | HttpOnly, SameSite=Lax cookie at `/api/v1/auth` | Issues new access tokens |
 
-- Refresh tokens are stored as a SHA-256 hash. The raw token exists only in the
-  cookie.
-- Refresh tokens rotate on every use. Reuse of a rotated token revokes the
-  entire session family — that pattern means the token was stolen.
-- Sessions can be revoked individually. Revocation is checked against the
-  database, so a stolen access token dies within its 15-minute lifetime and a
-  stolen refresh token dies immediately.
-- Passwords are hashed with Argon2id.
+The refresh cookie's Secure flag is enabled only when `APP_ENV=production`.
+The database stores the refresh-token SHA-256 hash. Refresh tokens rotate on
+use; reuse of a replaced token revokes its session family. Passwords use
+Argon2id, and password changes revoke all sessions. The web client does not
+automatically refresh or retry a request after access-token expiry.
 
-## 3. Authorization
+**Production blocker — `JWT_SECRET`:** configuration has a long development
+fallback. Production startup checks only that the effective secret is at least
+32 characters, so an unset variable uses the fallback and passes the check.
+Production does not fail closed when `JWT_SECRET` is missing. Configure a
+unique secret before running in production. See
+`apps/api/app/config/__init__.py` and `apps/api/app/main/__init__.py`.
 
-Two layers, both required.
+## 3. Authorization and approval
 
-**Role.** `owner` of the account sees everything that belongs to them. There is
-no admin role in Phase 1; an observability dashboard comes later and will have
-its own, separate authentication.
+User-owned access is checked in route handlers, but there is no repository
+layer guarantee: router handlers include direct SQL. Do not treat a repository
+abstraction as a universal user-scoping control.
 
-**Agent permission.** Each agent declares the operations it may perform. The
-orchestrator checks the declaration before dispatching a step. An agent cannot
-gain a permission at runtime, and retrieved content cannot grant one.
+When a plan requires approval, the task is stored with status
+`waiting_for_approval` and no job is created. There is no approve or reject
+endpoint, and exact-payload approval is not implemented. A waiting status is
+not a completed user-approval workflow.
 
-## 4. Action risk classification
+`/api/v1/admin/overview` exists behind `ADMIN_TOKEN`. It is an operator
+endpoint; there is no admin user role or admin dashboard.
 
-| Risk | Examples | Gate |
-|---|---|---|
-| LOW | Read, summarize, search, draft | Executes, recorded in the audit log |
-| MEDIUM | Create a calendar event, edit a cloud document, organize files | Executes, user is notified |
-| HIGH | Send email, delete a document, move money, change permissions, publish or deploy code | Blocked until the user approves the exact action |
+Sources: `apps/api/app/routers/tasks/__init__.py`,
+`apps/api/app/tasks_service/__init__.py`, `apps/api/app/routers/admin/__init__.py`,
+and `apps/api/app/security/__init__.py`.
 
-Approval binds to the hash of the action payload. If the payload changes after
-approval, the approval is void and the step returns to `WAITING_FOR_APPROVAL`.
+## 4. Row-level security
 
-## 5. Data protection
+Migration `0009` creates non-owner runtime role `jarvis_app` and forces RLS on
+these tenant tables only: `tasks`, `conversations`, `messages`, `memories`,
+`jobs`, `idempotency_keys`, `devices`, `sync_events`, `integrations`,
+`oauth_states`, `notifications`, `automations`, `task_steps`, and `task_events`.
 
-- **Per-user isolation.** Every table carrying user data has `user_id`, a
-  foreign key, and an index. Repository methods require `user_id` and will not
-  build a query without it. PostgreSQL row-level security is enabled on those
-  tables as a second barrier.
-- **Secrets.** Integration tokens and provider credentials are encrypted with
-  Fernet before they touch the database. The encryption key lives in the
-  environment, never in the database and never in the frontend.
-- **Logs.** Structured logs carry request IDs and task IDs. They do not carry
-  message content, memory content, tokens, or email addresses. A logging filter
-  enforces this rather than relying on discipline.
-- **Transport.** TLS terminates at the reverse proxy. Cookies are `Secure`.
+RLS is not enabled on `users`, `sessions`, `user_preferences`, `agents`,
+`agent_capabilities`, `audit_logs`, or `model_usage`. Handler-level query
+scoping and RLS coverage must be assessed separately; neither is an all-tables
+guarantee.
 
-## 6. Input validation
+Source: `database/migrations/versions/revisions_0007_0009/0009_rls_hardening.py`.
 
-- Every request body is a Pydantic model. Unknown fields are rejected.
-- String fields have explicit maximum lengths.
-- Identifiers are UUIDs, validated before any query.
-- Rate limiting is applied per user and per IP on authentication endpoints.
+## 5. Credentials, encryption, and logs
 
-## 7. Threats addressed in Phase 1
+Fernet encryption applies to stored Google integration tokens only. OpenAI and
+other provider credentials are environment configuration, not database
+credentials encrypted with Fernet. `.env.example` contains local sample values;
+it is not placeholders-only and is not production configuration.
 
-| Threat | Mitigation | Phase |
-|---|---|---|
-| Stolen access token | 15-minute expiry, server-side session revocation | 1 |
-| Stolen refresh token | Rotation with family-wide revocation on reuse | 1 |
-| Cross-user data access | Mandatory `user_id` scoping + row-level security | 1 |
-| Credential in source control | `.env` gitignored, `.env.example` has placeholders only | 1 |
-| Secret in logs | Logging filter, tested | 1 |
-| Prompt injection via retrieved content | Untrusted-content wrapping, no permission escalation | 5 |
-| CSRF | SameSite cookies, no state-changing GET | 1 |
-| XSS | React escaping, no `dangerouslySetInnerHTML`, CSP header | 3 |
+The API logger redacts selected named context fields, but does not filter
+message strings or exception text. The worker writes JSON fields directly and
+does not apply the API context-field redaction. Do not assume all user data is
+excluded from logs or that every request has a logged request ID.
 
-## 8. Known limitations
+Sources: `apps/api/app/integrations/crypto/__init__.py`,
+`apps/api/app/config/__init__.py`, `apps/api/app/logging/__init__.py`, and
+`apps/worker/jarvis_worker/loop.py`.
 
-- JWT signing uses a shared secret (HS256) in Phase 1. Asymmetric signing
-  (RS256) is deferred until more than one service must verify tokens.
-- Row-level security depends on the application setting the session user. The
-  repository layer is the primary control; RLS is defense in depth, and a test
-  verifies both.
-- Encryption at rest for the database volume depends on the hosting provider
-  and is a deployment concern, not an application one. Tracked for Phase 12.
+## 6. Input validation and rate limits
+
+`TaskIn` rejects selected server-owned fields, then uses `extra="ignore"`;
+unknown fields are not universally rejected across request bodies.
+
+Login is limited to eight failed attempts per client IP in five minutes using
+an in-process counter. There is no per-user login throttle; registration and
+refresh do not use this limiter. Selected task and assistant write routes have
+an in-process per-user limit of 30 requests per minute. The counters are not
+shared across processes.
+
+Sources: `apps/api/app/routers/tasks/__init__.py`,
+`apps/api/app/routers/auth/__init__.py`, and `apps/api/app/limits/__init__.py`.
+
+## 7. Transport security
+
+The Compose and Kubernetes manifests do not establish TLS termination. TLS is
+deployment-specific, and production TLS status remains outstanding. The refresh
+cookie's Secure flag is enabled only when `APP_ENV=production`; that setting
+does not itself provide TLS.
+
+## 8. High-priority gaps
+
+- **JWT signing secret:** an unset production `JWT_SECRET` uses the development
+  fallback and passes the minimum-length startup check. This is a
+  production-blocking code/config risk.
+- **Approval workflow:** waiting tasks have no approve/reject endpoint or
+  exact-payload approval implementation.
+- **Data access:** RLS applies only to the specified tenant tables; there is no
+  repository guarantee, and route handlers include direct SQL.
+- **Logging and rate limits:** redaction and counters are limited to the
+  behaviors described above; they are not universal or distributed controls.
+- **Transport:** configure and verify TLS termination in the target deployment.

@@ -3,22 +3,24 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-Two supported paths: run the API and web app locally against Docker Compose
-data services, or run the production-shaped services in a local Kubernetes
-cluster (`kind`). Both use the same database migrations.
+Two supported local paths: run the API and web app against Docker Compose
+data services, or run the services in a local Kubernetes cluster (`kind`).
+Both use the same database migrations. Neither Compose nor the kind setup
+configures TLS; both expose local HTTP endpoints and are not production TLS
+configurations.
 
 ## Requirements
 
 - Python 3.12
 - Node.js 20 or newer
-- Docker, for PostgreSQL, Redis, and LocalStack
+- Docker, for PostgreSQL and Redis
 - `kind` and `kubectl`, only for the Kubernetes path
 
 ## Path A — Docker Compose
 
 ```mermaid
 flowchart LR
-    a["docker compose up -d<br/>postgres, redis, localstack"] --> b["python -m venv .venv<br/>pip install -e .[dev]"]
+    a["docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis"] --> b["python -m venv .venv<br/>pip install -e . --group dev"]
     b --> c["alembic upgrade head"]
     c --> d["uvicorn app.main:app<br/>port 8000"]
     d --> e["npm install && npm run dev<br/>port 3000"]
@@ -28,12 +30,12 @@ flowchart LR
 ### 1. Start the data services
 
 ```bash
-docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis localstack
+docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis
 ```
 
-This starts only PostgreSQL (port 5433), Redis (port 6380), and LocalStack.
-The API, web, and worker are started separately below, avoiding duplicate
-services and port conflicts. Ports
+This starts only PostgreSQL (port 5433) and Redis (port 6380). The API, web,
+and worker are started separately below, avoiding duplicate services and port
+conflicts. LocalStack is optional scaffolding and is not used by the app. Ports
 5433 and 6380 are used instead of the defaults because 5432 and 6379 are often
 already taken on a developer machine.
 
@@ -47,15 +49,21 @@ flowchart LR
 ```
 
 The browser never talks to PostgreSQL, Redis, or the worker. Compose does not
-publish the worker health port. LocalStack is on `localhost:4566` and is not
-on this path.
+publish the worker health port. LocalStack is optional scaffolding; this path
+does not start it or use it.
 
 ### 2. Install the Python package
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -e . --group dev
 ```
+
+`dev` is a PEP 735 dependency group (see `[dependency-groups]` in
+`pyproject.toml`), not a `pip` extra — `pip install -e ".[dev]"` silently
+skips it with a "does not provide the extra 'dev'" warning and pytest will
+be missing. The `--group` flag requires `pip` 25.1 or newer; run
+`.venv/bin/pip install --upgrade pip` first if needed.
 
 ### 3. Configure environment variables
 
@@ -71,7 +79,7 @@ Never commit `.env`.
 
 | Variable | What it is | Where to get it |
 |---|---|---|
-| `JWT_SECRET` | Signs access tokens only (JWT HS256) | Generate locally: `python -c "import secrets; print(secrets.token_urlsafe(48))"`; set it in root `.env`. The code fallback is `dev-only-secret-change-me-not-for-production`. Do not use it outside local development. |
+| `JWT_SECRET` | Signs access tokens only (JWT HS256) | Generate a strong random value with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and set it explicitly in root `.env`. The app has a development fallback, so omitting this variable does not fail closed. The production guard checks only that the value has at least 32 characters; it does not check strength or uniqueness. Use a strong independent value in production. |
 | `ACCESS_TOKEN_TTL_SECONDS` | Access-token lifetime | Defaults to `900` (15 minutes). Not a secret. Compose does not pass it; a containerized API keeps the code default unless you add it to the API service environment. |
 | `REFRESH_TOKEN_TTL_SECONDS` | Refresh-token and cookie lifetime | Defaults to `2592000` (30 days). Not a secret. Same Compose gap as the access TTL. |
 | `POSTGRES_PASSWORD` | Password for the `jarvis` owner role | The current Compose manifest sets the local owner password directly; a same-named value in `.env` alone does not override it. If changing it, update the Compose `postgres` service and `DATABASE_URL_SYNC` together. |
@@ -106,7 +114,10 @@ host-run migrations, step 4 loads `DATABASE_URL_SYNC` from that same file.
 Nothing in the API, worker, Compose file, or Kubernetes manifests reads it.
 Do not treat it as a live endpoint. `APP_ENV` defaults to `development`.
 `production` turns the refresh cookie `Secure` flag on and refuses to start
-if `JWT_SECRET` is shorter than 32 characters. `LOG_LEVEL` defaults to `INFO`.
+if `JWT_SECRET` is shorter than 32 characters. It does not validate secret
+strength or uniqueness, and the development fallback means an unset value does
+not fail closed. Set an independent strong random `JWT_SECRET` explicitly in
+production. `LOG_LEVEL` defaults to `INFO`.
 
 Account creation is `POST /api/v1/auth/register`. Sign-in is
 `POST /api/v1/auth/login`. Both take JSON `email` (3–254 characters) and
@@ -334,11 +345,13 @@ deployments carry an init container that waits on it.
 
 #### Kubernetes credentials
 
-`kubectl apply` does not read root `.env`. Before applying the Secret
-manifests, replace their local values with the credentials for this cluster.
-The manifests use Kubernetes `data` fields, which are base64-encoded, not
-encrypted. Keep changed credentials out of Git; do not use these manifests as
-production secret management.
+`kubectl apply` does not read root `.env`. Provide local kind credentials
+through a local-only, untracked file or an approved secret-injection process;
+do not put populated secret values in Git or commit them. Kubernetes Secret
+`data` fields are base64-encoded, not encrypted. Kubernetes does not encrypt
+Secrets in etcd by default unless encryption at rest is configured. See the
+[Kubernetes Secret documentation](https://kubernetes.io/docs/concepts/configuration/secret/).
+Do not use these manifests as production secret management.
 
 | Manifest | Secret keys to configure |
 |---|---|
@@ -382,7 +395,7 @@ Manual verification URLs and a disposable test account are in
 | Admin overview (needs `ADMIN_TOKEN` as a Bearer token) | http://localhost:8000/api/v1/admin/overview | http://localhost:8001/api/v1/admin/overview |
 | PostgreSQL (host-side, for `psql`/`alembic`) | `localhost:5433` | not exposed; only reachable from the worker/API containers in-cluster |
 | Redis (host-side) | `localhost:6380` | not exposed; only reachable from the worker/API containers in-cluster |
-| LocalStack | http://localhost:4566 | not exposed by default; use `kubectl -n jarvis port-forward svc/localstack 4566:4566` |
+| LocalStack (optional; start separately) | http://localhost:4566 | not exposed by default; use `kubectl -n jarvis port-forward svc/localstack 4566:4566` |
 | LocalStack health check | http://localhost:4566/_localstack/health | same, after port-forwarding |
 | Worker health check (binds `127.0.0.1:8091` by default) | `http://127.0.0.1:8091/` when the worker runs directly on the host; not published by Compose containers | not published outside the worker container |
 | Google Cloud Console (to create OAuth credentials) | https://console.cloud.google.com/apis/credentials | same |
@@ -402,9 +415,10 @@ and rebuild.
 curl -s http://localhost:8000/api/v1/health
 ```
 
-Expect `"status":"ok"`. `"ai":{"configured":false,...}` is correct and expected
-without `OPENAI_API_KEY` — see
-[ARCHITECTURE.md §4](../architecture/ARCHITECTURE.md#4-backend).
+Expect `"status":"ok"`. This endpoint reports API status and model/speech
+configuration; it does not check database connectivity or worker health.
+`"ai":{"configured":false,...}` is correct and expected without
+`OPENAI_API_KEY` — see [ARCHITECTURE.md §4](../architecture/ARCHITECTURE.md#4-backend).
 
 To confirm the admin route (optional, only if `ADMIN_TOKEN` is set):
 
@@ -416,10 +430,10 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8000/api/v1/adm
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `alembic upgrade head` fails to connect | PostgreSQL not up yet, or wrong port | Confirm `docker compose ps` shows `postgres` healthy on 5433 |
-| API starts but `/api/v1/health` returns 500 | Migrations not applied | Run step 4 before step 5 |
+| `alembic upgrade head` fails to connect | PostgreSQL not up yet, or wrong port | Confirm `docker compose --project-directory . -f infra/compose/docker-compose.yml ps` shows `postgres` healthy on 5433 |
+| API starts but a database-backed route returns 500 | Migrations not applied | Run step 4 before step 5 |
 | `jarvis_app` role error on insert | `JARVIS_APP_DB_PASSWORD` differs from the password on the already-created role | Changing `.env` alone does not rotate an existing role; use your database administration process to rotate it, or reset only a disposable local database after confirming its data can be discarded |
-| `kind create cluster` fails with "port is already allocated" | Compose stack already bound to 8000/3000 | `kind-config.yaml` maps to 8001/3001 instead; confirm no other process holds those |
+| `kind create cluster` fails with "port is already allocated" | Another process already holds a mapped host port | `kind-config.yaml` maps to 8001/3001 instead of Compose ports; confirm no other process holds those |
 | Pods stuck `Init:ImagePullBackOff` | Images not loaded into the `kind` node | Re-run `kind load docker-image` for the three app images |
 | Google OAuth connect returns `integration_not_configured` | `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` unset, or `FERNET_KEY` unset | Set all three in `.env` and restart the API |
 | Google redirects back with an error, or the consent screen rejects the client | `GOOGLE_REDIRECT_URI` does not exactly match the URI registered on the Google OAuth client | Confirm both are identical, including trailing slash |

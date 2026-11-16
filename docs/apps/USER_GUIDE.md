@@ -19,13 +19,13 @@ flowchart LR
 
 ### Creating an account
 
-Open the web app and register with an email and password. Sign-in issues two
-credentials behind the scenes: a short-lived access token that authorizes your
-requests, and a longer-lived refresh token stored in the HttpOnly cookie
-`jarvis_refresh` (path `/api/v1/auth`) that keeps you signed in. You do not
-need to think about either — closing the tab signs you out of the active
-session; the refresh cookie brings you back without re-entering your password
-within its 30-day window. The cookie is marked `Secure` only when the
+Open the web app and register with an email and password. Sign-in issues a
+short-lived access token stored in the tab's `sessionStorage` and a longer-lived
+refresh token in the HttpOnly `jarvis_refresh` cookie (path `/api/v1/auth`).
+Although the cookie can persist for 30 days, the web client does not call the
+refresh endpoint or renew access tokens automatically. Closing the tab clears
+the access token; opening the app again does not restore the session
+automatically, so sign in again. The cookie is marked `Secure` only when the
 deployment sets `APP_ENV=production`. Local development leaves that flag off
 so the cookie works on `http://localhost`.
 
@@ -45,19 +45,30 @@ tells you plainly rather than guessing — see
 
 Hold the microphone control to speak, release it to stop. JARVIS listens in
 English or Hindi — switch languages with the control next to the microphone
-button. Your words are transcribed by your browser, not sent anywhere as audio.
+button. Speech recognition uses the browser's Web Speech API. Browser and
+recognition-provider behavior varies; some browsers may send audio to a remote
+recognition service. JARVIS cannot guarantee that audio stays on-device or is
+not sent elsewhere. See [MDN's SpeechRecognition documentation](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition).
 
 If your browser does not support speech recognition, the microphone control is
-unavailable and you type instead — this is a graceful fallback, not an error.
+unavailable and you type instead. JARVIS reads a reply aloud using browser-side
+speech synthesis. Typed messages are not read aloud automatically.
 
-JARVIS can read a reply aloud using your browser's own speech synthesis. Typed
-messages are never read aloud automatically; only a voice-submitted exchange is.
+```mermaid
+flowchart TD
+    hold["Hold the microphone"] --> browser["Browser transcribes speech"]
+    browser --> post["Transcribed text is sent to JARVIS"]
+    post --> reply["JARVIS replies"]
+    reply --> speak["Browser reads that reply aloud"]
+    type["Type and send"] --> stream["Reply streams in"]
+    stream --> silent["Not read aloud"]
+```
 
 ## Tasks versus chat replies
 
 Not everything you ask for is a quick reply. Some requests become a **task**:
-an item JARVIS works on in the background and reports back on, even after you
-close the browser.
+a record of requested work. Runnable tasks execute in the background, even if
+you close the browser.
 
 ```mermaid
 stateDiagram-v2
@@ -65,29 +76,22 @@ stateDiagram-v2
     Created --> Planning
     Planning --> WaitingForApproval: risky action
     Planning --> Executing: safe to proceed
-    WaitingForApproval --> Executing: you approve
-    WaitingForApproval --> Cancelled: you reject
     Executing --> Completed
     Executing --> Failed
 ```
 
-If a task involves something sensitive — sending an email, deleting a
-document, spending money, changing a permission, publishing, or deploying —
-JARVIS stops and asks for your explicit approval before doing it. Approval
-applies to that exact action; if the action would change, JARVIS asks again
-rather than reusing an old approval.
+A plan classified as requiring approval is stored with status
+`waiting_for_approval` and no job is created. The current API has no approval
+or rejection endpoint, so the task does not proceed. A cancel request for a
+task with no active job currently returns HTTP 409 (`No active job to cancel`).
 
-Closing your browser does not cancel a task in progress. Reopen JARVIS on any
-device and it will have continued, or already finished.
+Closing your browser does not cancel a task that already has a queued or
+running job. The worker continues independently of the browser.
 
 ## Memory
 
-JARVIS can remember things about you across conversations — preferences,
-ongoing projects, decisions you've made. Nothing becomes a memory
-automatically just because you mentioned it; JARVIS proposes a memory and you
-confirm it, or you explicitly tell it to remember something. You can mark a
-memory as sensitive, which keeps it out of reach of any assistant capability
-that does not need it.
+JARVIS can store account memories and include them in model context. The web UI has no controls to view, edit, or delete memories. The API accepts a `sensitive` label, but it does not exclude memories from
+model context. Do not store sensitive information on the assumption that the label protects it.
 
 ## Using JARVIS from another device
 
@@ -97,15 +101,14 @@ server, not on your device.
 
 ### Registering and removing devices
 
-JARVIS can track which devices you use it from (web, phone, desktop) for your
-own reference. If a device is lost or no longer yours, remove it from your
-account settings — a request naming a removed device is rejected.
+The API supports device registration, listing, and revocation. The web UI has
+no device-management controls.
 
 ## Connecting Gmail and Google Calendar
 
 From your account's integrations page, you can connect Gmail and Google
-Calendar so JARVIS can read a short summary (your Gmail address and message
-count, or your calendar count) as part of planning a task. This is separate
+Calendar so JARVIS can read Gmail profile totals, not email content, and the Google Calendar list, not
+event content, as part of planning a task. This is separate
 from "Siri and Google Assistant" below — it is JARVIS reading your Google
 account, not a voice assistant.
 
@@ -118,29 +121,44 @@ cannot read your Gmail or Calendar again until you reconnect. The consent
 request asks only to read mail and read calendars. JARVIS cannot send mail or
 change a calendar event with the current connection.
 
+```mermaid
+flowchart LR
+    connect["Connections, then Connect"] --> google["accounts.google.com"]
+    google --> back["localhost:3000/"]
+    back --> saved["Saved for this account"]
+```
+
 ## Siri and Google Assistant
 
-If you've connected a command from Siri or Google Assistant (where supported),
-it reaches the same JARVIS behind the scenes — the same task planner, the same
-approval rules, the same memory.
+There is no native Siri or Google Assistant integration. `siri` and
+`google_assistant` are API source labels, not connected assistants. A handoff
+response only advises you to continue with the named device assistant; JARVIS
+does not invoke it.
 
 ### When no AI model is configured
 
 Some JARVIS deployments do not have a model provider configured yet. In that
 case:
 
-- If you're asking something conversational through Siri or Google Assistant,
-  JARVIS hands the request back to your device's own assistant rather than
-  guessing at an answer — you'll see a note explaining that, and your phone's
-  own Siri or Assistant responds instead.
+- For a command submitted with the `siri` or `google_assistant` source label,
+  JARVIS can return a message advising you to ask that assistant. It does not
+  invoke the assistant or send the request back to it.
 - If you're asking through the web app or typing, JARVIS tells you plainly
   that no model is configured, instead of inventing a reply.
-- A request that just needs JARVIS to do something concrete (not answer a
-  question) still works and is queued as a task, because that path does not
-  need a language model to understand a clear instruction.
+- A command that names a JARVIS agent can be recorded as a task without a
+  model. If its plan requires approval, it is stored without a job and does
+  not execute. A vague request is not queued.
 
 This is intentional: JARVIS never fabricates an answer it cannot actually
 produce.
+
+```mermaid
+flowchart TD
+    ask["No model configured"] --> kind{"What did you ask?"}
+    kind -->|"Assistant source label"| back["Response advises asking that assistant"]
+    kind -->|"Chat in the web app"| told["Told that no model is configured"]
+    kind -->|"A command that names an agent"| task["Recorded; approval may block execution"]
+```
 
 ## What JARVIS cannot do (and won't pretend to)
 
@@ -149,10 +167,10 @@ device, some things are genuinely out of reach rather than simply unbuilt:
 
 | You might expect | What actually happens |
 |---|---|
-| "Hey JARVIS" always listening | Not possible from a browser tab without you holding the microphone button first |
-| JARVIS controlling apps on your Mac or iPhone directly | Not possible — JARVIS has no access to your local device; it works through its own cloud browser and connected accounts instead |
-| JARVIS reading files from your computer | Not possible — connect a cloud drive (Google Drive, OneDrive) instead |
-| Guaranteed push notifications on iPhone | Web push on iOS requires adding JARVIS to your Home Screen; otherwise you'll see in-app notifications and, if configured, email |
+| "Hey JARVIS" always listening | Not available; hold the microphone button to start speech recognition |
+| JARVIS controlling apps or reading files on your device | Not available; JARVIS has no local-device access |
+| Cloud browser, filesystem, or cloud-drive access | Not available; there is no cloud browser, filesystem, or drive integration |
+| Notifications outside JARVIS | Notifications appear in the app; any browser notification is local to the open app, not server push. There is no email delivery or server push |
 
 If something doesn't work the way you expect, JARVIS will say so rather than
 silently doing something else.
@@ -163,6 +181,6 @@ silently doing something else.
 |---|---|
 | "No model provider is configured" when chatting | This deployment has no AI credential set up yet; tasks and structured commands still work |
 | Microphone button is missing | Your browser doesn't support speech recognition; type instead |
-| A task is stuck "waiting for approval" | Open the task and approve or reject the specific action it's asking about |
-| Signed out unexpectedly | Your session may have been revoked (for example, after a password change) or your refresh cookie expired after 30 days — sign in again |
+| A task is stuck "waiting for approval" | The current API has no approve/reject endpoint and creates no job for this status; the task cannot proceed. A cancel request returns HTTP 409 when there is no active job |
+| Signed out after closing the tab | The refresh cookie does not automatically restore the access token; sign in again |
 | A device you removed can still see old data | Removing a device blocks new commands from it; it does not retroactively undo anything that device already did |

@@ -4,8 +4,9 @@
 **Last Updated**: 2026-11-16
 
 `apps/web` is the only user interface. It is a Next.js 15.5.29 App Router
-app. The browser talks only to the API. It never opens a database, a model
-provider, or an OAuth provider.
+app. The browser talks to the API for JARVIS data and does not open a database
+or call model and Google APIs directly. Google OAuth setup redirects the
+browser to Google's consent screen.
 
 ## Run
 
@@ -39,20 +40,31 @@ image sets it to the host-published API port, not a Docker DNS name.
 Every request sends `credentials: "include"`. The access token lives in
 `sessionStorage` under `jarvis_access` and is sent as
 `Authorization: Bearer`. The refresh token is an HttpOnly cookie scoped to
-`/api/v1/auth`. State-changing routes still require the Bearer token.
+`/api/v1/auth`, but the web API client has no refresh method and does not
+renew access tokens automatically. Closing the tab clears the access token;
+the persistent refresh cookie does not restore the session automatically. State-changing routes still require the Bearer token.
 
 The page is one workspace: sign in or register, then a conversation list and
-a streaming chat. Voice uses the browser Web Speech API. Hold the microphone
-to talk, release to stop. English and Hindi are the supported locales. If the
-browser cannot capture speech, the control is absent and the text field is
-the path. Typed messages are not spoken. There is no wake word.
+a streaming chat. Voice uses browser Web Speech recognition and speech
+synthesis. Hold the microphone to talk, release to stop. English and Hindi
+are the supported locales. If the browser cannot capture speech, the control
+is absent and the text field is the path. Typed messages are not spoken. There
+is no wake word.
+
+Speech recognition is browser/provider-dependent. Some browsers may send audio
+to a remote recognition service; JARVIS cannot guarantee that recognition
+stays on-device. See [MDN's SpeechRecognition documentation](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition).
+Speech synthesis runs in the browser.
 
 ## Security headers
 
 `next.config.ts` sets `X-Content-Type-Options: nosniff`,
 `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a CSP whose
 `connect-src` allows `'self'` and `http://localhost:8000`.
-`frame-ancestors` is `'none'`.
+`frame-ancestors` is `'none'`. The local kind web port `3001` cannot reach
+the API on `8001` with the checked-in CSP and build-time default API URL; the
+web image needs both a compatible CSP and a rebuild configured for that API
+origin.
 
 ## Dependency pins
 
@@ -63,5 +75,7 @@ at 15.5.29. Do not bump Next to clear an audit finding.
 ## What this app does not do
 
 - It does not store conversations, tasks, or memories. Those live on the API.
-- It does not call OpenAI, Google, or a speech vendor.
+- The browser does not call model or Google APIs directly. Google OAuth
+  connection setup redirects to Google's consent screen; API calls use the
+  JARVIS API.
 - It does not install anything on the device.
