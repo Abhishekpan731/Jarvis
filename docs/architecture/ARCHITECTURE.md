@@ -48,7 +48,7 @@ flowchart TB
         worker["apps/worker<br/>task executor"]
         subgraph data ["Data plane"]
             pg[("PostgreSQL 16<br/>+ pgvector")]
-            redis[("Redis 7<br/>queue + cache")]
+            redis[("Redis 7<br/>rate limiting + cache")]
             s3[("S3-compatible<br/>object storage")]
         end
     end
@@ -85,11 +85,12 @@ jarvis/
     worker/         Durable task executor (separate process, same codebase)
     web/            Next.js UI
   packages/
-    shared/         Pydantic models shared by api and worker (no I/O)
-    agent-contracts/ Agent identity, capability, and permission definitions
+    shared/         Types shared by api and worker (no I/O). Agent identity,
+                    capability, and permission definitions live in
+                    jarvis_shared.agents. There is no second contracts package.
   infrastructure/
-    docker/         Dockerfiles
-    caddy/          Reverse proxy config
+    docker/         Dockerfiles (images currently live next to each app)
+    caddy/          Reverse proxy config (not provisioned)
   database/
     migrations/     Alembic migrations (the only way schema changes)
   docs/
@@ -120,12 +121,12 @@ result.
 | Migrations | Alembic | Schema changes are reviewable and reversible |
 | Auth | JWT access token + rotating refresh token | Short-lived credentials, revocable sessions |
 | Streaming | Server-Sent Events | Works through proxies; no socket state to recover |
-| Tasks | Redis list queue + PostgreSQL state | Redis is fast; Postgres is the source of truth |
+| Tasks | PostgreSQL durable queue (`FOR UPDATE SKIP LOCKED`) | Postgres is the source of truth; no separate queue to desync from it |
 | Vectors | pgvector | One database, transactional with the memories it indexes |
 
 ### Provider interfaces
 
-Model and speech providers sit behind interfaces in `apps/api/app/providers/`.
+Model and speech providers sit behind interfaces in `apps/api/app/ai/`.
 Business logic names a capability (`complete`, `transcribe`, `synthesize`),
 never a vendor or a model. The concrete provider and model come from
 configuration. A missing credential degrades to an explicit "not configured"
@@ -177,8 +178,10 @@ without a state change.
 
 ### Durability rules
 
-1. **PostgreSQL holds the truth.** Task state, step state, and checkpoints live
-   in Postgres. Redis only holds the queue of task IDs waiting for a worker.
+1. **PostgreSQL holds the truth.** Task state, step state, checkpoints, and
+   the job queue itself live in Postgres. Workers claim jobs with
+   `FOR UPDATE SKIP LOCKED`, using lease tokens, fencing, and heartbeats for
+   recovery. There is no separate queue; Redis is not used for task dispatch.
 2. **A worker crash loses nothing.** On startup a worker reclaims tasks stuck
    in `EXECUTING` past their heartbeat timeout and requeues them. Steps are
    idempotent, keyed by `(task_id, step_index, attempt)`.
