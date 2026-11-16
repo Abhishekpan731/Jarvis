@@ -138,3 +138,38 @@ async def test_foreign_device_and_bad_source_are_rejected(client):
         json={"command": "research compare the two libraries", "source": "telegram"},
     )
     assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_device_source_hands_off_without_queueing(client):
+    headers = await _register(client, "handoff")
+    submitted = await client.post(
+        "/api/v1/assistant/commands",
+        headers=headers,
+        json={"command": "What time is it in Tokyo?", "source": "siri", "input_type": "voice"},
+    )
+    assert submitted.status_code == 202, submitted.text
+    body = submitted.json()
+    assert body["status"] == "handed_off"
+    assert body["handoff"] is True
+    assert body["device_assistant"] == "siri"
+    assert body["task_id"] is None
+    assert "Siri" in body["response_text"]
+    assert "Siri" in body["voice_response"]
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_api_source_does_not_invent_a_handoff(client):
+    headers = await _register(client, "nohandoff")
+    submitted = await client.post(
+        "/api/v1/assistant/commands",
+        headers=headers,
+        json={"command": "What is on my calendar?", "source": "api"},
+    )
+    assert submitted.status_code == 202, submitted.text
+    body = submitted.json()
+    assert body["handoff"] is False
+    assert body["device_assistant"] is None
+    assert body["task_id"] is None
+    assert body["status"] == "accepted"
+

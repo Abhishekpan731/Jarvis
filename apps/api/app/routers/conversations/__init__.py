@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from jarvis_shared.commands import SOURCES, device_assistant, handoff_reply
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -37,6 +38,7 @@ class ConversationPatch(BaseModel):
 
 class MessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
+    source: str | None = None
 
 
 def _not_found() -> HTTPException:
@@ -178,6 +180,7 @@ async def add_message(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Store the user's message and reply without streaming."""
+    _check_source(body.source)
     row = await _owned(session, conversation_id, user)
     session.add(_user_message(row, body.content))
     row.updated_at = datetime.now(UTC)
@@ -185,7 +188,7 @@ async def add_message(
     await set_tenant_guc(session, user.id)
 
     try:
-        reply, usage, plan, usage_row = await _reply(session, row)
+        reply, usage, plan, usage_row = await _reply(session, row, body.source)
     except HTTPException as exc:
         await session.commit()
         await set_tenant_guc(session, user.id)
@@ -193,7 +196,13 @@ async def add_message(
         raise
     saved = await _save_reply(row, reply, usage)
     task_id = await _maybe_task(session, row, plan, usage_row)
-    return _message(saved) | {"task_id": str(task_id) if task_id else None}
+    assistant = device_assistant(body.source or "")
+    handed_off = assistant is not None and plan.intent == "device_handoff"
+    return _message(saved) | {
+        "task_id": str(task_id) if task_id else None,
+        "handoff": handed_off,
+        "device_assistant": body.source if handed_off else None,
+    }
 
 
 @router.post("/{conversation_id}/stream")
@@ -203,22 +212,36 @@ async def stream(
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
+    _check_source(body.source)
     row = await _owned(session, conversation_id, user)
     session.add(_user_message(row, body.content))
     row.updated_at = datetime.now(UTC)
     await session.commit()
     # The streaming response outlives this dependency's session.
     conversation_id = row.id
+    source = body.source
 
     async def events():
         yield _event("response.started", {})
         try:
             model = get_model()
         except NotConfigured:
+            assistant = device_assistant(source or "")
+            if assistant is None:
+                yield _event(
+                    "error",
+                    {"code": "ai_not_configured", "message": "No model provider is configured."},
+                )
+                return
+            note = handoff_reply(assistant)
             yield _event(
-                "error",
-                {"code": "ai_not_configured", "message": "No model provider is configured."},
+                "assistant.handoff",
+                {"device_assistant": source, "text": note},
             )
+            async with session_scope() as stream_session:
+                await set_tenant_guc(stream_session, user.id)
+                conversation = await stream_session.get(Conversation, conversation_id)
+                await _save_reply(conversation, note, None, stream_session)
             return
         text = ""
         try:
@@ -254,6 +277,23 @@ def _user_message(conversation: Conversation, content: str) -> Message:
     )
 
 
+def _check_source(source: str | None) -> None:
+    if source is not None and source not in SOURCES:
+        raise HTTPException(422, error("invalid_source", "Unknown command source."))
+
+
+def _handoff_plan() -> Plan:
+    return Plan(
+        intent="device_handoff",
+        requires_execution=False,
+        agents=[],
+        risk="low",
+        requires_approval=False,
+        steps=[],
+        direct_answer=None,
+    )
+
+
 def _failure_note(exc: HTTPException) -> str:
     detail: dict = exc.detail if isinstance(exc.detail, dict) else {}
     code = detail.get("error", {}).get("code", "error")
@@ -261,14 +301,17 @@ def _failure_note(exc: HTTPException) -> str:
 
 
 async def _reply(
-    session: AsyncSession, conversation: Conversation
+    session: AsyncSession, conversation: Conversation, source: str | None = None
 ) -> tuple[str, dict | None, Plan, ModelUsage | None]:
     try:
         model = get_model()
     except NotConfigured:
-        raise HTTPException(
-            503, error("ai_not_configured", "No model provider is configured. Set OPENAI_API_KEY.")
-        )
+        assistant = device_assistant(source or "")
+        if assistant is None:
+            raise HTTPException(
+                503, error("ai_not_configured", "No model provider is configured. Set OPENAI_API_KEY.")
+            )
+        return handoff_reply(assistant), None, _handoff_plan(), None
     context = await build_context(session, conversation)
     plan, plan_usage = await plan_request(model, context[-1]["content"])
     usage_row = None

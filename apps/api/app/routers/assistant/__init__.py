@@ -10,7 +10,14 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from jarvis_shared.commands import INPUT_TYPES, SOURCES, normalize_command, voice_reply
+from jarvis_shared.commands import (
+    INPUT_TYPES,
+    SOURCES,
+    device_assistant,
+    handoff_reply,
+    normalize_command,
+    voice_reply,
+)
 from jarvis_shared.speech import normalize_locale
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -159,7 +166,8 @@ async def submit_command(
         if usage_row is not None:
             usage_row.task_id = task_id
 
-    reply = _reply_text(plan, missing)
+    assistant = _device_handoff(body.source, model, plan)
+    reply = handoff_reply(assistant) if assistant else _reply_text(plan, missing)
     session.add(
         Message(
             id=uuid.uuid4(),
@@ -174,17 +182,38 @@ async def submit_command(
         "request_id": idempotency_key or str(uuid.uuid4()),
         "conversation_id": str(conversation.id),
         "task_id": str(task_id) if task_id else None,
-        "status": "waiting_for_approval" if plan.requires_approval else "accepted",
+        "status": "handed_off" if assistant else _status(plan),
         "response_text": reply,
         "voice_response": voice_reply(reply),
-        "requires_approval": plan.requires_approval,
+        "requires_approval": False if assistant else plan.requires_approval,
         "source": body.source,
+        "handoff": assistant is not None,
+        "device_assistant": body.source if assistant else None,
     }
-    await _record(session, user, device, "command.accepted", result)
+    kind = "command.handed_off" if assistant else "command.accepted"
+    await _record(session, user, device, kind, result)
     if idempotency_key:
         await _remember(session, user.id, idempotency_key, result)
     await session.commit()
     return result
+
+
+def _status(plan) -> str:
+    if plan.requires_approval:
+        return "waiting_for_approval"
+    return "accepted"
+
+
+def _device_handoff(source: str, model, plan) -> str | None:
+    """Hand a conversational request back only when this device can continue it.
+
+    An executable keyword plan still queues. Web, desktop, and api have no
+    on-device assistant to hand the request to.
+    """
+    if model is not None or plan.requires_execution:
+        return None
+    return device_assistant(source)
+
 
 
 def _reply_text(plan, missing: str | None = None) -> str:

@@ -36,6 +36,15 @@ the existing job table, and the caller receives `202` immediately. A high-risk
 plan is stored as `waiting_for_approval` and is not queued. Voice invocation
 does not bypass the approval gate.
 
+When no model provider is configured, a conversational request from `siri` or
+`google_assistant` is handed back to that device assistant. The response status
+is `handed_off`, `handoff` is true, and `device_assistant` names the source.
+The backend does not invent an answer and does not call Siri or Google
+Assistant. An executable keyword plan still queues. `web`, `desktop`, and `api`
+have no on-device assistant, so those conversational requests stay on the
+existing unconfigured path. Conversation messages accept the same optional
+`source` and follow the same rule.
+
 ## Devices and sync
 
 `POST /api/v1/devices` registers a client (`ios`, `android`, `web`, `desktop`,

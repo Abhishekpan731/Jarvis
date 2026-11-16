@@ -32,3 +32,21 @@ def voice_reply(text: str) -> str:
         return flat
     cut = flat[:_VOICE_LIMIT].rsplit(" ", 1)[0]
     return cut.rstrip(".,;:") + "."
+
+# Interaction sources that already run on the user's device. The backend cannot
+# call them. It can only hand a request back when it cannot plan one itself.
+_DEVICE_ASSISTANTS = {"siri": "Siri", "google_assistant": "Google Assistant"}
+
+
+def device_assistant(source: str) -> str | None:
+    """Return the on-device assistant named by this source, or None."""
+    return _DEVICE_ASSISTANTS.get(source)
+
+
+def handoff_reply(assistant: str) -> str:
+    """Tell the client to continue on its own assistant. Do not invent an answer."""
+    return (
+        f"No model provider is configured, so I cannot answer that here. "
+        f"Continue with {assistant} on this device."
+    )
+
