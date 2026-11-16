@@ -1,5 +1,8 @@
 # JARVIS — Database Schema
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 PostgreSQL 16 with the `pgvector` and `pgcrypto` extensions. All schema changes
 go through Alembic migrations in `database/migrations/`. Nothing creates or
 alters tables at application startup.

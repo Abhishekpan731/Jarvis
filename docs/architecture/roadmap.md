@@ -1,7 +1,43 @@
 # JARVIS — Implementation Roadmap
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 Each phase ends with working, tested software and updated documentation. A
 phase is not done because code was written; it is done because its tests pass.
+
+## Current implementation status
+
+Audited 2026-11-15 against the working tree, not against earlier notes. A row
+is verified only when a command was run and its output observed.
+
+| Feature         | Existing implementation                                                                                                                                                                                                                                                        | Verified                                                                                                                | Remaining work                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Authentication  | Register, login, logout, refresh with rotation and family revocation, session lookup, password change, soft account deletion. Argon2id, HttpOnly refresh cookie, in-process login throttle. Password change and deletion revoke every session for the account.                 | Yes. `tests/test_auth.py` and `tests/test_review_regressions.py`, against PostgreSQL.                                   | Redis-backed rate limiting. Hard deletion of user data.                                                       |
+| Database        | PostgreSQL 16 with pgvector, migrations `0001` through `0005`. `0005` adds `integrations` and `oauth_states`.                                                                                                                                                                  | Yes. `alembic_version` is `0005`. Both new tables exist.                                                                | Row-level security is enabled but not forced; the application role owns the tables, so it bypasses it.        |
+| Agents          | 18 agents in `jarvis_shared.agents` and seeded by migration `0001`.                                                                                                                                                                                                            | Yes. `select count(*) from agents` returns 18. Registry import returns 18.                                              | No idempotent re-seed command. The migration inserts once; a second run is a no-op because Alembic tracks it. |
+| Task execution  | Durable. `app/jobs.py` queues work with lease tokens and fencing; `apps/worker/jarvis_worker/loop.py` claims with `FOR UPDATE SKIP LOCKED`, heartbeats, and reaps expired leases.                                                                                              | Yes. `tests/test_durable_jobs.py` and `tests/test_worker_recovery.py`.                                                  | No CI runs these automatically.                                                                               |
+| Frontend        | Next.js app in `apps/web`: sign in, register, conversation list, streaming chat, stop control, hold-to-talk, English/Hindi switch.                                                                                                                                             | Partially. `tsc` not re-run this phase. No browser test was run.                                                        | Rename and delete exist in the API client but not in the UI. Microphone use is untested on a device.          |
+| AI integration  | Provider interface, OpenAI implementation, factory that reports unconfigured instead of inventing a reply.                                                                                                                                                                     | Partially. Missing-key path verified: health reports `configured: false` and messaging returns 503 `ai_not_configured`. | No live call was made. No `OPENAI_API_KEY` is set.                                                            |
+| Voice           | Browser push-to-talk, English and Hindi, text fallback. A transcript is submitted to `POST /api/v1/assistant/commands` (`source: web`, `input_type: voice`). Unsupported voice locales are rejected. Typed chat is not spoken. No wake word. Server STT/TTS stay unconfigured. | Yes. `tests/test_voice.py`, including owner isolation on an existing conversation. Browser capture was not exercised.   | A speech vendor, once a credential exists.                                                                    |
+| Supervisor      | Plans a request, validates agents against the registry, forces approval on high-risk actions. One planner serves every source.                                                                                                                                                | Yes. `tests/test_supervisor.py`, 4 tests.                                                                               | Routing uses the model only when one is configured. Without a key it falls back to keyword matching.          |
+| Command gateway | `POST /api/v1/assistant/commands` accepts a source-tagged contract (`siri`, `google_assistant`, `web`, `desktop`, `api`), normalizes it, and routes it through the shared planner. A device id is attribution, never authentication.                                           | Yes. `tests/test_assistant.py`, 4 tests, against PostgreSQL.                                                            | Not exercised from a physical Siri or Google Assistant device.                                                |
+| Devices         | `devices` table with registration, per-device revocation, and last-seen tracking. Revoking a device blocks further commands attributed to it.                                                                                                                                  | Yes. `tests/test_assistant.py`.                                                                                         | No push transport (APNs/FCM). Clients poll `/api/v1/sync`.                                                    |
+| Sync            | Durable `sync_events` log with cursor replay at `GET /api/v1/sync`. Scoped per user; idempotency rows are excluded from the feed.                                                                                                                                              | Yes. `tests/test_assistant.py` covers replay and cross-account isolation.                                               | No live SSE push. Replay is pull-based.                                                                       |
+| Memory          | Table, CRUD API, keyword search, privacy class, active flag. Updates re-validate the privacy class.                                                                                                                                                                            | No. Endpoints exist; no test covers them.                                                                               | No embeddings are generated. The `embedding` column is empty.                                                 |
+| Streaming       | SSE endpoint emitting `response.started`, `text.delta`, `response.completed`, `error`.                                                                                                                                                                                         | No. Code reviewed, not exercised against a provider.                                                                    | Needs a configured provider to verify end to end.                                                             |
+| Integrations    | Gmail and Google Calendar connection flow with PKCE, single-use state, and Fernet ciphertext. The web app posts the callback; the code is not accepted on the API query string. A missing connection is not queued, and a worker does not invent a read.                       | Yes. `tests/test_integrations.py` and the email-step case in `tests/test_worker_recovery.py`. No Google call was made.  | No `GOOGLE_CLIENT_ID` is set. Reads are profile and calendar-list only. Sending mail is not granted.          |
+
+### What is explicitly not done
+
+- Semantic memory retrieval. The column exists; nothing writes it.
+- Wake word and local device control. Impossible under the zero-install constraint.
+- Native Siri and Google Assistant invocation. Both require a native app to
+  register intents; none is installed. See `docs/architecture/ASSISTANTS.md`.
+- Push delivery to devices. Sync is pull-based replay, not APNs or FCM.
+- Live LLM responses. No credential is configured, and none was invented.
+- A live Google connection. No client id or secret is configured, so no mailbox
+  or calendar was read.
 
 ## Phase 1 — Foundation (current)
 
@@ -51,7 +87,7 @@ Push-to-talk in the web client, English and Hindi, text fallback when the
 browser cannot capture, and a provider boundary that reports unconfigured
 instead of inventing a transcript. No wake word. Server-side transcription and
 synthesis are not wired: no speech credential is configured. See
-`docs/architecture/VOICE.md`. Covered by `tests/test_voice.py`.
+`docs/architecture/ARCHITECTURE.md`. Covered by `tests/test_voice.py`.
 
 ## Phase 8 — Integrations
 

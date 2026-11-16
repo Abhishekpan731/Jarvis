@@ -59,5 +59,5 @@ docs            Architecture, API, security
 
 ## Status
 
-See [docs/architecture/IMPLEMENTATION_STATUS.md](docs/architecture/IMPLEMENTATION_STATUS.md).
+See [docs/architecture/roadmap.md](docs/architecture/roadmap.md#current-implementation-status).
 Task execution is in-process and not durable. The worker is a later phase.

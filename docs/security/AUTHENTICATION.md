@@ -1,5 +1,8 @@
 # JARVIS — Authentication
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 Complements [SECURITY.md](SECURITY.md) with the behaviour that is implemented.
 
 ## Tokens

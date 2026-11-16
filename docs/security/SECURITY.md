@@ -1,5 +1,8 @@
 # JARVIS — Security Model
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 Security boundaries are defined before features, so every later phase inherits
 them instead of retrofitting them.
 

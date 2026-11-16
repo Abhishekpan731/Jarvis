@@ -1,5 +1,8 @@
 # JARVIS — System Architecture
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 **Status:** Phase 1 (foundation). This document is the source of truth for
 structure, boundaries, and constraints. It is updated at the end of every phase.
 
@@ -78,27 +81,15 @@ authentication, per-user isolation, and permission checks.
 
 ## 3. Repository layout
 
-```
+```text
 jarvis/
-  apps/
-    api/            FastAPI service: auth, conversations, memory, tasks, agents
-    worker/         Durable task executor (separate process, same codebase)
-    web/            Next.js UI
-  packages/
-    shared/         Types shared by api and worker (no I/O). Agent identity,
-                    capability, and permission definitions live in
-                    jarvis_shared.agents. There is no second contracts package.
-  infrastructure/
-    docker/         Dockerfiles (images currently live next to each app)
-    caddy/          Reverse proxy config (not provisioned)
-  database/
-    migrations/     Alembic migrations (the only way schema changes)
-  docs/
-    architecture/   This document and the diagrams
-    api/            API conventions
-    security/       Threat model and security boundaries
-  tests/            Cross-service integration tests
-  scripts/          Dev tooling
+  apps/api/            FastAPI service (auth, conversations, memory, tasks)
+  apps/worker/         Durable executor. Claims jobs from PostgreSQL.
+  apps/web/            Next.js UI. Talks only to the API.
+  packages/shared/     Types only. Agent contracts live in jarvis_shared.agents.
+  database/migrations/ Alembic. The only way the schema changes.
+  docs/                architecture, api, security
+  tests/               Cross-service integration tests
   docker-compose.yml
   .env.example
 ```
@@ -315,3 +306,139 @@ Phase 1 — infrastructure is not provisioned until the application justifies it
 | 10 | Security hardening | Not started |
 | 11 | Observability | Not started |
 | 12 | Production deployment | Not started |
+
+---
+
+## 12. Conversation Engine
+
+### Flow
+
+1. The user posts a message to `/api/v1/conversations/{id}/stream`.
+2. The message is stored before any model call, so a provider failure never
+   loses what the user typed.
+3. `build_context` assembles the system prompt, preferences, up to ten active
+   memories, the conversation summary, and recent messages, dropping the oldest
+   until the result fits a 6,000-token budget.
+4. The provider streams deltas. Each becomes an SSE `text.delta` event.
+5. The completed text is stored as an assistant message. If the provider is
+   not configured, the stored message says so and names the error code.
+
+A non-streaming variant lives at `POST /conversations/{id}/messages`. It asks
+the supervisor to plan first and, when the plan needs execution and no
+approval, creates a task through the existing `Task` and `TaskStep` models.
+
+### Provider
+
+`app/ai/provider_factory.py` is the only place that decides which provider
+runs. With no `OPENAI_API_KEY` it raises `NotConfigured`, and the API returns
+503 `ai_not_configured`. Nothing substitutes a fake answer.
+
+### Supervisor
+
+`app/ai/supervisor.py` returns a `Plan`. Before anything acts on it,
+`validate_plan` removes agents that are not in the registry and forces
+`requires_approval` when an action contains send, delete, pay, purchase,
+deploy, publish, or transfer. The model cannot add an agent or lower a risk.
+
+### Limitations
+
+- Execution is in-process. It does not survive an API restart.
+- A streamed reply is stored after the final event. A client that disconnects
+  before that point loses the reply. The user's message is already stored.
+- Task creation commits separately from the reply. A crash between the two can
+  leave a reply without its task.
+- Context budgeting counts characters, not tokens. It is a ceiling, not an
+  exact bill.
+- Cost figures in `app/ai/usage.py` are estimates for two models and are
+  labelled as such.
+
+---
+
+## 13. Voice
+
+Phase 7. Capture and playback stay in the browser the user already has open.
+Nothing is installed, and there is no wake word.
+
+### What is implemented
+
+The web client has a hold-to-talk control and an English/Hindi switch. Holding
+the control starts the browser's speech recognition in the locale returned by
+`GET /api/v1/voice/session`. Releasing it stops listening. A finished transcript
+is submitted as a voice command to `POST /api/v1/assistant/commands` with
+`source: web` and the open conversation id. That is the same planner and the
+same queue as Siri and Google Assistant. Typed messages stay on the conversation
+stream and are not spoken back. If the voice submit fails, the transcript is
+put back in the message field so it can be sent as text.
+
+`POST /api/v1/voice/speak` shortens a finished reply to the 240-character voice
+limit and returns the text plus a BCP-47 language tag. The browser speaks that
+text with its own speech synthesis. The response `audio` field is `null`: this
+API does not generate audio.
+
+When the browser has no speech recognition, the client tells the user to type.
+That is the text fallback, and `text_fallback` is always true: typing remains
+valid even if a server speech credential is added later. A missing credential is
+reported separately. `stt_configured` and `tts_configured` are false on
+`/api/v1/health`, and no transcript is invented. A voice command whose locale is
+not English or Hindi is rejected with 422 before planning.
+
+### What is not implemented
+
+`STT_PROVIDER` and `TTS_PROVIDER` are accepted as configuration and reported in
+health. No vendor implementation is wired, because no credential is configured
+and none was invented. A future provider implements `transcribe` and
+`synthesize` behind `app/ai/speech.py` and does not change the command gateway.
+
+Wake-word activation is not possible under the zero-install constraint and is
+not built. No microphone permission is requested until the user holds the
+control.
+
+---
+
+## 14. Diagrams
+
+Rendered versions of the diagrams in [this document](#2-system-context) and
+[SECURITY.md](../security/SECURITY.md).
+
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Web as Next.js UI
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant W as Worker
+
+    User->>Web: Instruction (text or voice)
+    Web->>API: POST /api/v1/assistant/commands (Bearer)
+    API->>API: Validate token, resolve user
+    API->>DB: Insert task, task_event, and jobs row
+    API-->>Web: 202 Accepted
+    W->>DB: Claim with FOR UPDATE SKIP LOCKED
+    W->>DB: Heartbeat the lease, run the step
+    W->>DB: Transition to completed, write the result
+    Web->>API: GET /api/v1/tasks/{id}
+    API-->>Web: completed
+```
+
+Closing the browser drops the SSE connection only. The worker keeps running
+because it never depended on the connection.
+
+### Data isolation
+
+```mermaid
+flowchart TB
+    req["Authenticated request"] --> mw["Auth middleware<br/>resolves user_id from token"]
+    mw --> repo["Repository layer<br/>every query filters on user_id"]
+    repo --> db[("PostgreSQL<br/>row-level policies")]
+    db --> resp["Response scoped to caller"]
+
+    other["Any query without user_id"] -.->|rejected by construction| repo
+```
+
+Isolation is enforced twice: the repository layer requires a `user_id`
+argument and will not construct a query without one, and PostgreSQL row-level
+security rejects rows the session is not permitted to see. Either control
+failing closed is sufficient; both are present so one regression is not enough
+to leak data.

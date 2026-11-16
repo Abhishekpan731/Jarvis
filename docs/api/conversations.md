@@ -1,5 +1,8 @@
 # Conversation API
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 All routes require `Authorization: Bearer <access token>`. A conversation that
 belongs to another account returns 404.
 

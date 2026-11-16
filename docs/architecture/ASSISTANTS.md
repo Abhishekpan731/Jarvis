@@ -1,5 +1,8 @@
 # JARVIS — Native assistant integration
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 Siri and Google Assistant are interaction surfaces. They are not reasoning
 providers. Every command, whatever its source, reaches the same planner
 (`app/ai/supervisor.py`), the same agent registry, and the same durable queue.

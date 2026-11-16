@@ -1,5 +1,8 @@
 # JARVIS — API Conventions
 
+**Author**: Abhishek Pandey
+**Last Updated**: 2026-11-16
+
 Base path: `/api/v1`. All request and response bodies are JSON. All timestamps
 are ISO 8601 in UTC.
 
