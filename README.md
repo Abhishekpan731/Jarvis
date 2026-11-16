@@ -12,7 +12,7 @@ Nothing is installed on the user's devices.
 ## Run
 
 ```bash
-docker compose up -d
+docker compose --project-directory . -f infra/compose/docker-compose.yml up -d
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 DATABASE_URL_SYNC=postgresql+psycopg://jarvis:jarvis@localhost:5433/jarvis \
@@ -35,7 +35,7 @@ are often already taken.
 
 ## Configure a model
 
-Copy `.env.example` to `.env` and set `OPENAI_API_KEY`. Without it the API
+Copy `config/env/.env.example` to `.env` with `cp config/env/.env.example .env`, then set `OPENAI_API_KEY`. Without it the API
 starts normally, `/api/v1/health` reports `"configured": false`, and sending a
 message returns 503 `ai_not_configured`. JARVIS does not invent replies.
 

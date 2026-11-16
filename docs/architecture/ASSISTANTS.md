@@ -66,7 +66,7 @@ authenticated backend.
 
 Until those apps exist, the contract is reachable from the web client and from
 any HTTP client that holds a valid access token. The backend side is tested in
-`tests/test_assistant.py`. No physical device has invoked it, and this document
+`tests/assistant/test_assistant.py`. No physical device has invoked it, and this document
 does not claim otherwise.
 
 ## Adding a native app later

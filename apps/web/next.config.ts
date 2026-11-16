@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  typescript: {
+    tsconfigPath: "config/tsconfig.json",
+  },
+  async rewrites() {
+    return [{ source: "/next.svg", destination: "/assets/next.svg" }];
+  },
   async headers() {
     return [
       {

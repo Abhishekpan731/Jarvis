@@ -20,6 +20,18 @@ __pycache__/
 *.log
 
 # Node / web
+# Web-specific rules formerly in apps/web/.gitignore
+apps/web/**/.pnp
+apps/web/**/.pnp.*
+apps/web/.yarn/*
+!apps/web/.yarn/patches
+!apps/web/.yarn/plugins
+!apps/web/.yarn/releases
+!apps/web/.yarn/versions
+apps/web/**/*.pem
+apps/web/**/.env*
+apps/web/**/.vercel/
+
 node_modules/
 .next/
 next-env.d.ts

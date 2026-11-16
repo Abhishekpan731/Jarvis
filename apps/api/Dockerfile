@@ -59,7 +59,7 @@ USER jarvis
 
 WORKDIR /app/apps/api
 
-# Health endpoint is apps/api/app/main.py:/api/v1/health. It reports AI/speech
+# Health endpoint is apps/api/app/main/__init__.py:/api/v1/health. It reports AI/speech
 # provider configuration state and does not require a database connection, so
 # it is safe to call before migrations have run.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

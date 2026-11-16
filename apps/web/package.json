@@ -6,7 +6,13 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint --config config/eslint.config.mjs",
+    "typecheck": "tsc --project config/tsconfig.json"
+  },
+  "postcss": {
+    "plugins": {
+      "@tailwindcss/postcss": {}
+    }
   },
   "dependencies": {
     "react": "19.1.0",

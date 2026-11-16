@@ -3,7 +3,7 @@ services:
     image: pgvector/pgvector:pg16
     # `jarvis` is the owner role; it creates the database and runs migrations.
     # Migration 0009 creates a second, non-owner `jarvis_app` login role (see
-    # JARVIS_APP_DB_PASSWORD in .env.example) that the application connects
+    # JARVIS_APP_DB_PASSWORD in config/env/.env.example) that the application connects
     # as at runtime, so Postgres row-level security is actually enforced.
     environment:
       POSTGRES_USER: jarvis
@@ -56,7 +56,7 @@ services:
 
   # One-shot. Alembic runs as the table owner (`jarvis` / password `jarvis`,
   # the same values the postgres service was initialized with). Do not
-  # interpolate POSTGRES_PASSWORD here: a copied .env.example used to set
+  # interpolate POSTGRES_PASSWORD here: a copied config/env/.env.example used to set
   # that to `change-me`, which cannot log in to this database.
   migrate:
     image: jarvis-api:local
@@ -133,7 +133,7 @@ services:
     image: jarvis-web:local
     build:
       context: apps/web
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
     ports:

@@ -88,17 +88,17 @@ jarvis/
   apps/api/            FastAPI service (auth, conversations, memory, tasks)
   apps/worker/         Durable executor. Claims jobs from PostgreSQL.
   apps/web/            Next.js UI. Talks only to the API.
-  packages/shared/     Types only. Agent contracts live in jarvis_shared.agents.
+  packages/shared/     Shared contracts and pure helper modules.
   database/migrations/ Alembic. The only way the schema changes.
-  docs/                architecture, api, security
+  docs/                architecture, api, security, apps
   tests/               Cross-service integration tests
-  docker-compose.yml
-  .env.example
+  infra/compose/       docker-compose.yml
+  config/env/          .env.example
 ```
 
-`packages/shared` contains types only. It imports nothing from `apps/`, so the
-API and worker cannot drift apart on the shape of a task, a memory, or an agent
-result.
+`packages/shared` contains shared contracts and pure helpers, including the agent registry and task state machine. It imports nothing from `apps/`, keeping these shared definitions independent of API and worker implementation details.
+
+No directory holds more than four files, excluding `.git`, `.venv`, `__pycache__`, and generated build output such as `*.egg-info/` and `.next/`. Modules that would have broken that cap are packages (`app.briefing`, `app.db`, `app.routers.auth`) so existing imports stay valid. Alembic keeps one history: `version_locations` lists `revisions_0001_0003`, `revisions_0004_0006`, and `revisions_0007_0009`.
 
 ---
 
@@ -282,7 +282,7 @@ protocol because there is no local replica.
 
 ## 10. Deployment
 
-`docker-compose.yml` runs PostgreSQL, Redis, LocalStack, a one-shot migrate
+`infra/compose/docker-compose.yml` runs PostgreSQL, Redis, LocalStack, a one-shot migrate
 service, the API, the worker, and the web app. There is no reverse proxy in
 Compose. The same images deploy to a single host without code changes; only
 environment variables differ.
