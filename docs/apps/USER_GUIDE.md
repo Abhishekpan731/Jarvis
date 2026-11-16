@@ -3,9 +3,8 @@
 **Author**: Abhishek Pandey
 **Last Updated**: 2026-11-16
 
-JARVIS runs entirely in your browser. There is nothing to install on your
-Mac, iPhone, or iPad — open the web app, sign in, and everything happens on
-JARVIS's cloud infrastructure.
+JARVIS is accessed through your browser; there is nothing to install on your
+Mac, iPhone, or iPad. The API and worker run on JARVIS's infrastructure.
 
 ## Getting started
 
@@ -67,8 +66,11 @@ flowchart TD
 ## Tasks versus chat replies
 
 Not everything you ask for is a quick reply. Some requests become a **task**:
-a record of requested work. Runnable tasks execute in the background, even if
-you close the browser.
+a record of requested work. Queued tasks run in the background, even if you
+close the browser. The worker currently has real handlers only for limited
+Google profile-total and Calendar-list reads; other agent steps can finish with
+a placeholder result without carrying out the requested action. A task marked
+completed is not proof that an unimplemented capability was performed.
 
 ```mermaid
 stateDiagram-v2
@@ -90,27 +92,28 @@ running job. The worker continues independently of the browser.
 
 ## Memory
 
-JARVIS can store account memories and include them in model context. The web UI has no controls to view, edit, or delete memories. The API accepts a `sensitive` label, but it does not exclude memories from
-model context. Do not store sensitive information on the assumption that the label protects it.
+JARVIS can store account memories and include them in model context. The web
+UI has no controls to view, edit, or delete memories. The API accepts a
+`sensitive` label, but it does not exclude memories from model context. Do not
+store sensitive information on the assumption that the label protects it.
 
 ## Using JARVIS from another device
 
-Sign in on a second device and your conversations, tasks, and memories are all
-there — there is no separate sync step, because everything lives on the
-server, not on your device.
+Sign in on another device to access the same account's conversation history.
+Account data is stored on the server, so no separate sync step is needed.
 
-### Registering and removing devices
+### Device management (API only)
 
 The API supports device registration, listing, and revocation. The web UI has
 no device-management controls.
 
 ## Connecting Gmail and Google Calendar
 
-From your account's integrations page, you can connect Gmail and Google
-Calendar so JARVIS can read Gmail profile totals, not email content, and the Google Calendar list, not
-event content, as part of planning a task. This is separate
-from "Siri and Google Assistant" below — it is JARVIS reading your Google
-account, not a voice assistant.
+The integrations page supports Google Gmail and Google Calendar. Gmail access
+reads profile totals, not email content. Calendar access reads the calendar
+list, not event content. The connections are read-only; JARVIS cannot send
+email or write calendar events. These are Google account connections, not
+voice-assistant integrations.
 
 Connecting sends you to Google's own consent screen at
 `https://accounts.google.com`. The local default return address is
@@ -146,8 +149,10 @@ case:
 - If you're asking through the web app or typing, JARVIS tells you plainly
   that no model is configured, instead of inventing a reply.
 - A command that names a JARVIS agent can be recorded as a task without a
-  model. If its plan requires approval, it is stored without a job and does
-  not execute. A vague request is not queued.
+  model. That does not mean the requested work is implemented: except for the
+  limited Google read handlers, agent steps can return a placeholder completion
+  without doing the requested action. If its plan requires approval, it is
+  stored without a job and does not execute. A vague request is not queued.
 
 This is intentional: JARVIS never fabricates an answer it cannot actually
 produce.
@@ -179,7 +184,7 @@ silently doing something else.
 
 | Symptom | What's happening |
 |---|---|
-| "No model provider is configured" when chatting | This deployment has no AI credential set up yet; tasks and structured commands still work |
+| "No model provider is configured" when chatting | Some clear instructions can be recorded as tasks without a model; approval-gated plans have no job and do not execute |
 | Microphone button is missing | Your browser doesn't support speech recognition; type instead |
 | A task is stuck "waiting for approval" | The current API has no approve/reject endpoint and creates no job for this status; the task cannot proceed. A cancel request returns HTTP 409 when there is no active job |
 | Signed out after closing the tab | The refresh cookie does not automatically restore the access token; sign in again |

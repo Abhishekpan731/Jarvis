@@ -29,11 +29,17 @@ from app.security import (
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
-# In-process login throttle. A restart clears it, which is acceptable until the
-# Redis-backed limiter arrives with the worker phase.
+# In-process login/register throttle, keyed per endpoint and client IP. A
+# restart clears it, which is acceptable until the Redis-backed limiter
+# arrives with the worker phase.
 _ATTEMPTS: dict[str, list[float]] = defaultdict(list)
 _WINDOW_SECONDS = 300
 _MAX_ATTEMPTS = 8
+
+
+def reset_throttle() -> None:
+    """Clear counters. Tests use this so one case cannot exhaust the next."""
+    _ATTEMPTS.clear()
 
 AUTH_FAILED = "The email or password is not correct."
 
@@ -58,6 +64,10 @@ def _throttle(key: str) -> None:
     recent.append(now)
 
 
+def _throttle_key(scope: str, request: Request) -> str:
+    return f"{scope}:{client_ip(request)}"
+
+
 def _issue(response: Response, user: User, row_id: uuid.UUID, refresh: str) -> dict:
     response.set_cookie(**refresh_cookie(refresh))
     return {"access_token": access_token_for(user.id, row_id), "token_type": "bearer"}
@@ -70,6 +80,7 @@ async def register(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    _throttle(_throttle_key("register", request))
     email = body.email.strip().lower()
     if "@" not in email or len(email.split("@")[1]) < 3:
         raise HTTPException(422, error("invalid_email", "Enter a valid email address."))
@@ -101,7 +112,7 @@ async def login(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    _throttle(client_ip(request))
+    _throttle(_throttle_key("login", request))
     email = body.email.strip().lower()
     user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if (

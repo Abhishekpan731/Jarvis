@@ -194,6 +194,12 @@ async def add_message(
         await set_tenant_guc(session, user.id)
         await _save_reply(row, _failure_note(exc), None)
         raise
+    except ProviderError as exc:
+        await session.commit()
+        await set_tenant_guc(session, user.id)
+        http_exc = HTTPException(503, error("provider_error", str(exc)))
+        await _save_reply(row, _failure_note(http_exc), None)
+        raise http_exc from exc
     saved = await _save_reply(row, reply, usage)
     task_id = await _maybe_task(session, row, plan, usage_row)
     assistant = device_assistant(body.source or "")

@@ -12,7 +12,7 @@ configuration can add protections, but they are not assumed here.
 flowchart LR
     subgraph untrusted ["Untrusted"]
         browser["Browser"]
-        ext["External content<br/>email, web pages, documents"]
+        ext["External provider responses"]
     end
     subgraph boundary ["Trust boundary"]
         api["API<br/>authn + authz + validation"]
@@ -23,14 +23,19 @@ flowchart LR
     end
 
     browser -->|Bearer token| api
-    ext -.->|retrieved content| worker
+    ext -.->|untrusted model input/output| api
+    ext -.->|OAuth responses| worker
     api --> db
     worker --> db
 ```
 
-Retrieved content is treated as untrusted input. This does not replace
-server-side authorization or a completed approval workflow; see the approval
-limitations below.
+User-supplied text, stored memories and summaries, model output, and any
+external-provider response must be treated as data, not authority. The context
+builder currently wraps memories and conversation summaries before sending
+them to a model. Google integration code reads Gmail profile totals and
+Calendar list metadata; it does not retrieve email bodies, web pages, or
+documents. This does not replace server-side authorization or a completed
+approval workflow; see the limitations below.
 
 ## 2. Authentication
 
@@ -105,11 +110,11 @@ Sources: `apps/api/app/integrations/crypto/__init__.py`,
 `TaskIn` rejects selected server-owned fields, then uses `extra="ignore"`;
 unknown fields are not universally rejected across request bodies.
 
-Login is limited to eight failed attempts per client IP in five minutes using
-an in-process counter. There is no per-user login throttle; registration and
-refresh do not use this limiter. Selected task and assistant write routes have
-an in-process per-user limit of 30 requests per minute. The counters are not
-shared across processes.
+Login and registration are each limited to eight attempts per client IP in
+five minutes, using separate in-process counters. There is no per-user login
+or registration throttle, and refresh does not use this limiter. Selected task
+and assistant write routes have an in-process per-user limit of 30 requests
+per minute. The counters are not shared across processes.
 
 Sources: `apps/api/app/routers/tasks/__init__.py`,
 `apps/api/app/routers/auth/__init__.py`, and `apps/api/app/limits/__init__.py`.

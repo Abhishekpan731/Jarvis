@@ -23,7 +23,14 @@ from app.config import settings
 from app.db import get_session, set_tenant_guc
 from app.models import Session, User
 
-_hasher = PasswordHasher()
+# Explicit Argon2id cost parameters (never rely on library defaults, which
+# can change between releases and silently shift the application's security
+# posture). These exceed every equal-defense configuration listed in the
+# OWASP Password Storage Cheat Sheet (m=19 MiB/t=2/p=1 through m=46 MiB/t=1/p=1).
+# Parallelism is pinned to 1: OWASP notes raising it does not reliably buy
+# extra resistance to cracking, and a lower value keeps the cost of hashing
+# one password predictable on a single request thread under concurrent load.
+_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=1)
 _bearer = HTTPBearer(auto_error=False)
 REFRESH_COOKIE = "jarvis_refresh"
 

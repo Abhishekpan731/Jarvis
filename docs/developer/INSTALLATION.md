@@ -13,14 +13,15 @@ configurations.
 
 - Python 3.12
 - Node.js 20 or newer
-- Docker, for PostgreSQL and Redis
+- Docker, for PostgreSQL. The Compose setup also starts Redis, which the
+  application does not currently use.
 - `kind` and `kubectl`, only for the Kubernetes path
 
 ## Path A — Docker Compose
 
 ```mermaid
 flowchart LR
-    a["docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis"] --> b["python -m venv .venv<br/>pip install -e . --group dev"]
+    a["docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis"] --> b["python -m venv .venv<br/>upgrade pip; install -e . --group dev"]
     b --> c["alembic upgrade head"]
     c --> d["uvicorn app.main:app<br/>port 8000"]
     d --> e["npm install && npm run dev<br/>port 3000"]
@@ -33,9 +34,10 @@ flowchart LR
 docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis
 ```
 
-This starts only PostgreSQL (port 5433) and Redis (port 6380). The API, web,
-and worker are started separately below, avoiding duplicate services and port
-conflicts. LocalStack is optional scaffolding and is not used by the app. Ports
+This starts only PostgreSQL (port 5433) and Redis (port 6380). The application
+currently uses PostgreSQL but does not use Redis. The API, web, and worker are
+started separately below, avoiding duplicate services and port conflicts.
+LocalStack is optional scaffolding and is not used by the app. Ports
 5433 and 6380 are used instead of the defaults because 5432 and 6379 are often
 already taken on a developer machine.
 
@@ -43,9 +45,8 @@ already taken on a developer machine.
 flowchart LR
     browser["Browser<br/>localhost:3000"] -->|"Bearer access token"| api["API<br/>localhost:8000"]
     api -->|"jarvis_app"| pg["PostgreSQL<br/>localhost:5433"]
-    api --> redis["Redis<br/>localhost:6380"]
+    redis["Redis<br/>localhost:6380; unused by app"]
     worker["Worker<br/>health 127.0.0.1:8091"] -->|"claims jobs"| pg
-    worker --> redis
 ```
 
 The browser never talks to PostgreSQL, Redis, or the worker. Compose does not
@@ -56,14 +57,14 @@ does not start it or use it.
 
 ```bash
 python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/pip install -e . --group dev
 ```
 
 `dev` is a PEP 735 dependency group (see `[dependency-groups]` in
-`pyproject.toml`), not a `pip` extra — `pip install -e ".[dev]"` silently
-skips it with a "does not provide the extra 'dev'" warning and pytest will
-be missing. The `--group` flag requires `pip` 25.1 or newer; run
-`.venv/bin/pip install --upgrade pip` first if needed.
+`pyproject.toml`), not a `pip` extra — `pip install -e ".[dev]"` does not
+install it. The `--group` option requires `pip` 25.1 or newer; upgrading pip
+first ensures that a fresh virtual environment supports the documented command.
 
 ### 3. Configure environment variables
 
@@ -330,7 +331,7 @@ kind create cluster --name jarvis --config infra/k8s/base/kind-config.yaml
 kind load docker-image jarvis-api:local jarvis-worker:local jarvis-web:local --name jarvis
 
 kubectl apply -f infra/k8s/base/namespace.yaml -f infra/k8s/base/rbac.yaml
-kubectl apply -f infra/k8s/secrets/app/ -f infra/k8s/secrets/data/
+# Apply Secret objects from local-only, untracked manifests or approved injection.
 kubectl apply -f infra/k8s/data/
 kubectl apply -f infra/k8s/base/migrate-job.yaml
 kubectl -n jarvis wait --for=condition=Complete job/migrate --timeout=180s
@@ -345,9 +346,10 @@ deployments carry an init container that waits on it.
 
 #### Kubernetes credentials
 
-`kubectl apply` does not read root `.env`. Provide local kind credentials
-through a local-only, untracked file or an approved secret-injection process;
-do not put populated secret values in Git or commit them. Kubernetes Secret
+`kubectl apply` does not read root `.env`. Provide the required Secret objects
+through local-only, untracked manifests or an approved secret-injection
+process; do not put populated secret values in Git or commit them. Use the
+listed keys as a reference when preparing local credentials. Kubernetes Secret
 `data` fields are base64-encoded, not encrypted. Kubernetes does not encrypt
 Secrets in etcd by default unless encryption at rest is configured. See the
 [Kubernetes Secret documentation](https://kubernetes.io/docs/concepts/configuration/secret/).

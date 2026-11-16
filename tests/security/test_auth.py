@@ -17,6 +17,19 @@ async def _register(client, email=None, password="correct horse battery"):
 
 
 @pytest.mark.asyncio
+async def test_register_is_throttled_per_ip(client):
+    # The budget (8 per 5 minutes) is shared across emails for one client IP,
+    # so distinct emails still trip the limit once the budget is spent.
+    for _ in range(8):
+        reply = await _register(client)
+        assert reply.status_code == 201
+
+    throttled = await _register(client)
+    assert throttled.status_code == 429
+    assert throttled.json()["error"]["code"] == "rate_limited"
+
+
+@pytest.mark.asyncio
 async def test_register_login_session_and_logout(client):
     email = _email()
     created = await _register(client, email)

@@ -72,7 +72,7 @@ sending the refresh cookie for this request.
 | HTTP 422 | `invalid_source` | `source` is not a known command source. |
 | HTTP 422 | `invalid_status` | Patch `status` is not `active` or `archived`. |
 | HTTP 503 | `ai_not_configured` | Non-streaming `POST /api/v1/conversations/{conversation_id}/messages`, when no model is configured and the source is not a device assistant. |
-| Unhandled HTTP 500 | — | A provider failure in non-streaming `POST /api/v1/conversations/{conversation_id}/messages` is not caught by that handler and is not converted to the route's `provider_error` shape. |
+| HTTP 503 | `provider_error` | Non-streaming `POST /api/v1/conversations/{conversation_id}/messages`, when the provider fails after its retries. The user's message and an honest failure note are both persisted. |
 | SSE `error` event | `ai_not_configured` / `provider_error` | Stream failure after the HTTP response has started; HTTP status remains 200. |
 
 HTTP exceptions use the application's JSON error handler. Request-validation

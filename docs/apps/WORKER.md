@@ -33,8 +33,13 @@ Each loop:
    One account has at most one running job.
 5. Heartbeats each claimed lease until the task finishes or the lease is lost.
 
-A lost lease stops the runner from writing further state for that job. A
-second worker can then claim it. Two workers do not execute the same job.
+A lost lease stops the old runner from writing further state for that job; a
+second worker can then claim it. A step may be retried while an earlier
+external request is still in flight, so execution does not guarantee exactly-
+once side effects. Currently, only Google integration steps have real task
+handlers, limited to Gmail profile totals and Calendar-list metadata. Other
+agent steps return a placeholder `<agent_id>: completed` result rather than
+performing their advertised capability.
 
 The worker imports `app.jobs`, `app.execution`, `app.integrations.runner`,
 `app.briefing`, `app.config`, and `app.db`. It is a separate process, not a
@@ -55,8 +60,9 @@ The health check listens on `127.0.0.1:8091`. Override the port with
 `ready_to_claim`, queue depth, and in-flight jobs. It does not include user
 data or database error text.
 
-The port is not published off the host. In Docker, only the container
-`HEALTHCHECK` can reach it. There is no host URL.
+For a host-run worker, the endpoint is available only at
+`http://127.0.0.1:8091/` (or the configured port). In Compose, the port is not
+published to the host; only the container `HEALTHCHECK` can reach it.
 
 ## What this process does not do
 

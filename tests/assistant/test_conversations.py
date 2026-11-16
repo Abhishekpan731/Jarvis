@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from app.ai.base import ProviderError
 from app.ai.provider_factory import provider_status
 
 
@@ -57,6 +58,38 @@ async def test_message_requires_a_configured_provider(client):
     history = await client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=headers)
     assert [row["role"] for row in history.json()["messages"]] == ["user", "assistant"]
     assert "ai_not_configured" in history.json()["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_message_reports_a_provider_failure_as_503_not_500(client, monkeypatch):
+    class _FailingModel:
+        name = "openai"
+        model = "gpt-test"
+
+        async def complete(self, *args, **kwargs):
+            raise ProviderError("The provider rejected the request.")
+
+        async def stream(self, *args, **kwargs):
+            raise ProviderError("The provider rejected the request.")
+
+    monkeypatch.setattr("app.routers.conversations.get_model", lambda: _FailingModel())
+
+    headers = await _user(client)
+    created = await client.post("/api/v1/conversations", headers=headers, json={})
+    conversation_id = created.json()["id"]
+
+    reply = await client.post(
+        f"/api/v1/conversations/{conversation_id}/messages",
+        headers=headers,
+        json={"content": "What is on my calendar?"},
+    )
+    assert reply.status_code == 503
+    assert reply.json()["error"]["code"] == "provider_error"
+
+    # Both turns are stored: the question, and an honest record of the failure.
+    history = await client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=headers)
+    assert [row["role"] for row in history.json()["messages"]] == ["user", "assistant"]
+    assert "provider_error" in history.json()["messages"][1]["content"]
 
 
 @pytest.mark.asyncio

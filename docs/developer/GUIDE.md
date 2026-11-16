@@ -50,7 +50,7 @@ keeps every import path exactly what it was before the split.
 | `app.context` | Assembles conversation context: system prompt, preferences, memories, summary |
 | `app.ai` | Provider interfaces, OpenAI implementation, the supervisor, speech |
 | `app.jobs` | The durable job queue: claim, lease, heartbeat, requeue |
-| `app.execution` | Runs a task step once an agent has been dispatched |
+| `app.execution` | Runs task steps, checking permissions. The worker currently performs limited Google read steps; other agents may return placeholder completion results rather than perform their advertised capability. |
 | `app.tasks_service` | Task creation, state transitions, event recording |
 | `app.integrations` | OAuth connection flow and the integration step runner |
 | `app.notifications` | In-app notification writes and reads |
@@ -69,19 +69,19 @@ keeps every import path exactly what it was before the split.
 | `schemas` | `Plan`, `Completion`, and related Pydantic types shared across providers |
 | `supervisor` | Plans a request into steps, validates against the agent registry, forces approval on high-risk actions |
 | `prompts` | System prompt templates |
-| `untrusted` | Wraps retrieved content (email, web pages) as labelled, non-instructional data — the prompt-injection boundary from [SECURITY.md §1](../security/SECURITY.md) |
+| `untrusted` | Wraps stored memories and conversation summaries passed into model context as labelled data. The current Google integration reads Gmail profile totals and Calendar list metadata; it does not retrieve email bodies or web pages. |
 | `usage` | Token and estimated-cost accounting for `model_usage` |
-| `speech` | Speech provider boundary; reports unconfigured status, does not invent a transcript |
+| `speech` | Server-side STT/TTS interfaces; providers are not implemented. The status endpoint reflects configured provider names, not operational availability. |
 
 ### `apps/api/app/routers`
 
-Each router package exposes one `APIRouter` and is registered in `app.main`.
-Routers never query the database or call a provider directly for business
-logic beyond request validation and response shaping — they delegate to
-`app.tasks_service`, `app.ai.supervisor`, `app.jobs`, or the relevant service
-module. This keeps HTTP concerns (status codes, request/response schemas)
-separate from business rules, so the rules are reachable from both the HTTP
-layer and tests without duplicating them.
+Each router package exposes an `APIRouter` and is registered in `app.main`.
+The layering is not uniform: several route handlers issue SQL or ORM queries
+directly, and some call provider or service code. Task creation and other
+shared operations also live in `app.tasks_service`, `app.ai.supervisor`,
+`app.jobs`, and related modules. When changing a route, follow its current
+pattern and add tests for the behavior; do not assume a repository layer
+provides universal tenant scoping.
 
 Registered prefixes, from `app.main` and each router package:
 
@@ -148,10 +148,11 @@ an SSE `error` event named `ai_not_configured`; it does not return HTTP 503.
 The non-streaming message route does return HTTP 503 with that code. `siri`
 and `google_assistant` are API source labels, not native integrations. A
 handoff response only advises the caller to ask the named assistant; JARVIS
-does not invoke it. A command that names a registered agent still queues
-through the keyword fallback when no model is configured. Plans requiring
-approval are persisted as `waiting_for_approval` without a job; the current API
-has no approval or rejection endpoint, so those tasks do not execute.
+does not invoke it. A command that names a registered agent can still be
+recorded through the keyword fallback when no model is configured. Plans
+requiring approval are persisted as `waiting_for_approval` without a job; the
+current API has no approval or rejection endpoint, so those tasks do not
+execute.
 
 The API exposes memory and device registration/list/revocation endpoints, but
 the current web UI has no user-facing memory CRUD or device-management
@@ -262,9 +263,9 @@ Agents are data, not classes — see
 
 1. Add the setting to `app.config`.
 2. Add it to `config/env/.env.example` with a comment explaining what happens
-   when it is unset — JARVIS reports "not configured" rather than silently
-   degrading, so document that behavior rather than leaving the reader to
-   infer it.
+   when it is unset. Failure behavior varies by setting: some features report
+   "not configured," while others use a development fallback or are
+   unavailable. Describe the actual behavior for that setting.
 3. If it is a secret (API key, signing key, database password), never give it
    a real-looking default. A blank value in `.env.example` is correct.
 
@@ -275,11 +276,13 @@ Agents are data, not classes — see
 ```
 
 Tests are organized by feature area under `tests/`: `assistant`, `integrations`,
-`jobs`, `operations`, `security`. Auth and conversation tests need PostgreSQL
-running (`docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis`), because the suite exercises row-level
-security and cross-tenant isolation against a real database rather than
-mocking it — those are exactly the properties a mock would hide a regression
-in.
+`jobs`, `operations`, `security`. The database-backed tests use the configured
+PostgreSQL database and write test records; they exercise row-level security
+and cross-tenant isolation against a real database. Point `DATABASE_URL` at an
+isolated, disposable test database before running them. Do not use a shared
+development or production database. Start PostgreSQL only after verifying that
+the target database is disposable; the Compose database is not automatically
+made safe for tests.
 
 Run a single feature area:
 
@@ -300,11 +303,14 @@ Run a single feature area:
 
 ## Code conventions
 
-- **FastAPI + Pydantic v2** for every request and response body. Unknown
-  fields are rejected, not ignored.
-- **SQLAlchemy 2.0 async** with explicit queries. No lazy-loading relationship
-  traversal that could hide an unscoped query — every tenant-table query takes
-  `user_id` as an explicit argument at the repository boundary.
+- **FastAPI + Pydantic v2** for request validation. Unknown-field behavior is
+  model-specific; for example, `TaskIn` ignores extra fields. Do not assume
+  every request model rejects unknown fields.
+- **SQLAlchemy 2.0 async** is used by routes and service modules. The current
+  code does not have a universal repository boundary, and handlers include
+  direct SQL/ORM queries. For tenant-owned data, explicitly scope each query
+  by the authenticated user where applicable and verify the table's RLS policy
+  separately.
 - **No fabricated responses.** A missing credential (model provider, speech
   provider, Google OAuth) returns an explicit "not configured" error or status
   field. See the provider factory pattern in `app.ai.provider_factory` and

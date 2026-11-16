@@ -37,7 +37,7 @@ covered under `tests/`.
 `http://localhost:8000`. That value is inlined at build time. The Docker
 image sets it to the host-published API port, not a Docker DNS name.
 
-Every request sends `credentials: "include"`. The access token lives in
+Requests through the shared API helper send `credentials: "include"`; the streaming request does not send cookies. The access token lives in
 `sessionStorage` under `jarvis_access` and is sent as
 `Authorization: Bearer`. The refresh token is an HttpOnly cookie scoped to
 `/api/v1/auth`, but the web API client has no refresh method and does not
@@ -69,8 +69,11 @@ origin.
 ## Dependency pins
 
 `package.json` overrides keep `minimatch` at 11.0.8 for
-`@typescript-eslint/typescript-estree` and `postcss` at 8.5.33. Next stays
-at 15.5.29. Do not bump Next to clear an audit finding.
+`@typescript-eslint/typescript-estree` and `postcss` at 8.5.33. Next is pinned
+at 15.5.29, which the [November 2026 Next.js security release](https://nextjs.org/blog/november-2026-security-release)
+lists as the patched 15.x Maintenance LTS version. Before changing the pin,
+check current advisories and deployment compatibility; do not silence a
+Next.js vulnerability with an override instead of applying the vendor's patch.
 
 ## What this app does not do
 

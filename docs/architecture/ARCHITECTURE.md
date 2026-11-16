@@ -89,6 +89,7 @@ jarvis/
   docs/                architecture, api, security, apps
   tests/               Cross-service integration tests
   infra/compose/       docker-compose.yml
+  infra/k8s/           Kubernetes manifests for local kind deployment
   config/env/          .env.example
 ```
 
@@ -191,8 +192,10 @@ no user-facing approval or rejection flow invokes them.
 2. **Expired leases are recoverable.** The worker reaps expired jobs according
    to their attempt policy. Completed steps are skipped on resume; a running
    step may be retried, so execution does not guarantee exactly-once side effects.
-3. **Closing the browser changes nothing.** The browser is a subscriber to task
-   events, not a participant in execution.
+3. **Closing the browser changes nothing.** The worker executes queued jobs
+   independently of the browser. The API supports pull-based sync-event replay,
+   but the current web client does not subscribe to task events or poll the sync
+   endpoint automatically.
 4. **Restart survival is tested**, not assumed. The integration test kills the
    worker mid-task and asserts the task still completes.
 
@@ -210,9 +213,11 @@ payload hash or exact-action approval binding is implemented. See the
 ## 6. Agent architecture
 
 The supervisor plans tasks into ordered steps. The worker checks permissions
-and executes each step through an available handler; step results are stored in
-the task result. Agent registry entries describe capabilities but do not
-implement them or guarantee that a handler exists.
+and runs each step; step results are stored in the task result. Agent registry
+entries describe capabilities but do not implement them or guarantee that a
+handler exists. Currently, Google integration steps perform read-only Gmail
+profile-total or Calendar-list requests. Other agent steps return a placeholder
+`<agent_id>: completed` result; they do not perform the advertised capability.
 
 ```mermaid
 flowchart LR
@@ -290,6 +295,17 @@ reverse proxy in Compose. The application uses PostgreSQL for task data and the
 job queue. LocalStack is an S3 scaffold that the application does not call;
 Redis is not currently used by the application; task/command write limits and
 login throttling are in-process.
+
+`infra/k8s/` is an alternative, local-only path: Kubernetes manifests for a
+single-node `kind` cluster, mirroring the same services as Compose (namespace,
+RBAC, Postgres/Redis/LocalStack, a migration Job, and Deployments for the API,
+worker, and web app). `infra/k8s/secrets/` holds the Secret manifests `kubectl
+apply` requires in place of `.env` (not read by `kubectl apply`). The `kind`
+config maps NodePorts to host ports 8001 (API) and 3001 (web); see
+[Installation](../developer/INSTALLATION.md#path-b--local-kubernetes-kind) for
+the full apply order and the known API/web port mismatch in the checked-in web
+image. Like Compose, this is a local development target, not production
+infrastructure.
 Production infrastructure is not provisioned.
 
 ---
@@ -299,15 +315,15 @@ Production infrastructure is not provisioned.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1 | Architecture, monorepo, database, auth, health, task state machine | Implemented |
-| 2 | User management, sessions, preferences | Implemented |
+| 2 | User management, sessions, preferences | Partial; authentication exists, but session management, preferences, and hard deletion remain incomplete |
 | 3 | Conversations and model provider integration | Implemented |
 | 4 | Memory CRUD and keyword search | Partial; no semantic retrieval or proposal-and-commit flow |
-| 5 | Agent orchestration | Implemented |
+| 5 | Agent orchestration | Partial; planning and validation exist, but most agent execution handlers are placeholders |
 | 6 | Durable task execution and worker | Implemented |
 | 7 | Browser voice interface | Implemented; no server-side STT/TTS provider |
 | 8 | Gmail and Google Calendar OAuth | Implemented for profile-total and calendar-list reads only |
 | 9 | Notifications and automations | Implemented; in-app only |
-| 10 | Security hardening | Implemented |
+| 10 | Security hardening | Partial; see documented coverage gaps in [SECURITY.md](../security/SECURITY.md) |
 | 11 | Observability | Implemented |
 | 12 | Production deployment | Not started |
 
@@ -336,13 +352,15 @@ there is no approval endpoint.
 
 ### Provider
 
-`app/ai/provider_factory.py` is the only place that decides which provider
-runs. With no `OPENAI_API_KEY` it raises `NotConfigured`, and the API returns
-503 `ai_not_configured`. Nothing substitutes a fake answer.
+`app.ai.provider_factory` is the only place that decides which provider
+runs. With no `OPENAI_API_KEY` it raises `NotConfigured`. The non-streaming
+message route returns HTTP 503 `ai_not_configured`; the streaming route has
+already started HTTP 200 and emits an SSE `error` event with that code. Nothing
+substitutes a fake answer.
 
 ### Supervisor
 
-`app/ai/supervisor.py` returns a `Plan`. Before anything acts on it,
+`app.ai.supervisor` returns a `Plan`. Before anything acts on it,
 `validate_plan` removes agents that are not in the registry and forces
 `requires_approval` when an action contains send, delete, pay, purchase,
 deploy, publish, or transfer. The model cannot add an agent or lower a risk.
@@ -360,7 +378,7 @@ deploy, publish, or transfer. The model cannot add an agent or lower a risk.
   leave a reply without its task.
 - Context budgeting counts characters, not tokens. It is a ceiling, not an
   exact bill.
-- Cost figures in `app/ai/usage.py` are estimates for two models and are
+- Cost figures in `app.ai.usage` are estimates for two models and are
   labelled as such.
 
 ---

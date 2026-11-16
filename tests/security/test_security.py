@@ -11,7 +11,8 @@ from app.execution import execute_task
 from app.jobs import insert_job
 from app.limits import limit_writes, reset
 from app.models import Device, Memory, Task, TaskEvent, TaskStep, User
-from app.security import refresh_cookie
+from app.security import hash_password, refresh_cookie, verify_password
+from app.security import _hasher
 from jarvis_shared.agents import action_allowed
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -214,3 +215,17 @@ async def test_rls_write_check_rejects_a_row_for_a_different_tenant():
                 ),
                 {"id": uuid.uuid4(), "user_id": user_b},
             )
+
+
+def test_password_hasher_uses_explicit_cost_parameters_not_library_defaults():
+    """Pin the cost parameters so an argon2-cffi upgrade cannot silently
+    change the application's password-hashing strength."""
+    assert _hasher.time_cost == 3
+    assert _hasher.memory_cost == 65536
+    assert _hasher.parallelism == 1
+
+
+def test_password_hash_round_trips_and_rejects_the_wrong_password():
+    digest = hash_password("correct horse battery staple")
+    assert verify_password(digest, "correct horse battery staple") is True
+    assert verify_password(digest, "wrong password") is False

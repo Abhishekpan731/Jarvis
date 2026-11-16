@@ -76,8 +76,11 @@ and must be between -10 and 10. `Idempotency-Key` is optional: same key and
 same request replays the existing task with HTTP 200; same key with a different
 request returns HTTP 409 `idempotency_conflict`. A new plan that needs approval
 creates a waiting task without a job. There is no endpoint to approve or reject
-that task. The response's `http_status` field reports the intended 201 or 202,
-but the actual HTTP status is 200 as noted above.
+that task. Queueing a task does not guarantee its requested capability is
+implemented: only limited Google read handlers perform external work; other
+agent steps can return a placeholder completion result. The response's
+`http_status` field reports the intended 201 or 202, but the actual HTTP status
+is 200 as noted above.
 
 ## Pagination and bounded lists
 

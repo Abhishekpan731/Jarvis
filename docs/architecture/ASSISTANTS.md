@@ -6,7 +6,7 @@
 The API accepts `siri` and `google_assistant` as command source attribution
 labels. No native iOS or Android app invokes this endpoint; those labels do not
 represent installed assistant integrations. Commands submitted to the endpoint
-reach the same planner (`app/ai/supervisor.py`), agent registry, and durable
+reach the same planner (`app.ai.supervisor`), agent registry, and durable
 queue when the plan is executable.
 
 ## What is implemented
@@ -42,10 +42,13 @@ When no model provider is configured, a conversational request tagged
 `siri` or `google_assistant` receives a handoff response naming that source.
 The response status is `handed_off`, `handoff` is true, and `device_assistant`
 names the source. The backend does not invoke a native assistant or invent an
-answer. An executable keyword plan still queues. `web`, `desktop`, and `api`
-have no on-device assistant, so those conversational requests stay on the
-existing unconfigured path. Conversation messages accept the same optional
-`source` and follow the same rule.
+answer. An executable keyword plan still queues, but queueing is not proof
+that the requested capability runs. Google integration steps have limited
+read-only handlers; other agent steps can return a placeholder completion
+without doing the requested work. `web`, `desktop`, and `api` have no on-device
+assistant, so those conversational requests stay on the existing unconfigured
+path. Conversation messages accept the same optional `source` and follow the
+same rule.
 
 ## Devices and sync
 

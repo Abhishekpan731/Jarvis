@@ -7,7 +7,8 @@ Nothing is installed on the user's devices.
 
 - Python 3.12
 - Node.js 20 or newer
-- Docker, for PostgreSQL and Redis
+- Docker, for PostgreSQL. The Compose setup also starts Redis, which the
+  application does not currently use.
 
 ## Run
 
@@ -23,6 +24,7 @@ values.
 cp config/env/.env.example .env
 docker compose --project-directory . -f infra/compose/docker-compose.yml up -d postgres redis
 python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/pip install -e . --group dev
 set -a
 . ./.env
@@ -35,7 +37,7 @@ The Compose command starts only PostgreSQL and Redis. Run the API, worker, and
 web app as host processes as shown here; starting all Compose services as well
 would bind the same API and web ports.
 
-In a second terminal, start the worker. Tasks stay queued until it is running:
+In a second terminal, start the worker. Runnable jobs stay queued until it is running:
 
 ```bash
 .venv/bin/python -m jarvis_worker
@@ -58,15 +60,18 @@ are often already taken.
 
 Requires `kind` and `kubectl`. The local cluster uses HTTP and does not
 configure TLS. Review [Kubernetes credential handling](docs/developer/INSTALLATION.md#kubernetes-credentials)
-before applying Secrets; never commit populated secret values. Build the images
-first (`docker compose --project-directory . -f infra/compose/docker-compose.yml build`), then:
+before applying Secrets. Prepare them from local-only, untracked manifests or
+an approved secret-injection process; never commit populated secret values.
+Build the images first
+(`docker compose --project-directory . -f infra/compose/docker-compose.yml build`),
+then:
 
 ```bash
 kind create cluster --name jarvis --config infra/k8s/base/kind-config.yaml
 kind load docker-image jarvis-api:local jarvis-worker:local jarvis-web:local --name jarvis
 
 kubectl apply -f infra/k8s/base/namespace.yaml -f infra/k8s/base/rbac.yaml
-kubectl apply -f infra/k8s/secrets/app/ -f infra/k8s/secrets/data/
+# Apply Secret objects from local-only, untracked manifests or approved injection.
 kubectl apply -f infra/k8s/data/
 kubectl apply -f infra/k8s/base/migrate-job.yaml
 kubectl -n jarvis wait --for=condition=Complete job/migrate --timeout=180s
@@ -93,7 +98,11 @@ message returns 503 `ai_not_configured`. JARVIS does not invent replies.
 .venv/bin/python -m pytest
 ```
 
-The auth and conversation tests need the database running.
+The auth, conversation, and other database-backed tests use the configured
+PostgreSQL database and write test data. Point `DATABASE_URL` at an isolated,
+disposable test database before running them; do not use a shared development
+or production database. The Compose PostgreSQL service is not automatically
+made safe for tests.
 
 ## Layout
 
@@ -120,7 +129,10 @@ docs              Architecture, API, security, user and developer guides
 ## Status
 
 See [docs/architecture/roadmap.md](docs/architecture/roadmap.md#current-implementation-status).
-Task execution is durable. The worker claims jobs from PostgreSQL with
-`FOR UPDATE SKIP LOCKED`. Without the worker, tasks are queued and never
-claimed. Row-level security isolates each account. Nothing is installed on
-the user's devices.
+Task execution uses a durable PostgreSQL queue. The worker claims jobs with
+`FOR UPDATE SKIP LOCKED`; without it, runnable jobs stay queued and unclaimed.
+Approval-gated tasks are stored as `waiting_for_approval` without a job. Agent
+registry entries do not guarantee a task handler exists: currently only
+limited Google read steps perform external work; other agent steps may return a
+placeholder completion. Row-level security covers selected tables, not every
+account table. Nothing is installed on the user's devices.

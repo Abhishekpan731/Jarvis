@@ -35,13 +35,15 @@ Passwords are hashed with Argon2id. Login failures return the same message for
 an unknown email and a wrong password. Changing a password revokes every
 session, so the caller must sign in again.
 
-## Login throttling
+## Login and registration throttling
 
-Login allows eight failed attempts per client IP in a five-minute window. The
-counter is in-process and resets on restart. There is no per-user login limit;
-registration and refresh do not use this throttle. Selected task and assistant
-write routes have a separate in-process per-user limit of 30 requests per
-minute. These limits are not shared across application processes.
+Login and registration each allow eight attempts per client IP in a
+five-minute window, tracked as separate counters so failed logins do not
+consume the registration budget or vice versa. The counters are in-process and
+reset on restart. There is no per-user login or registration limit, and
+refresh does not use this throttle. Selected task and assistant write routes
+have a separate in-process per-user limit of 30 requests per minute. These
+limits are not shared across application processes.
 
 Implementation: `apps/api/app/routers/auth/__init__.py` and
 `apps/api/app/limits/__init__.py`.
