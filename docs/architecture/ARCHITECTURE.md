@@ -1,7 +1,7 @@
 # JARVIS — System Architecture
 
 **Author**: Abhishek Pandey
-**Last Updated**: 2026-11-16
+**Last Updated**: 2026-11-22
 
 **Status:** Code exists for work across phases 1 through 11, but some phase
 features remain incomplete and verification varies by feature. Phase 12
@@ -117,10 +117,13 @@ No directory holds more than four files, excluding `.git`, `.venv`, `__pycache__
 ### Provider interfaces
 
 Model providers sit behind an interface in `apps/api/app/ai/`; the concrete
-provider and model come from configuration. Speech interfaces exist, but there
-is no server-side STT or TTS provider implementation. Voice capture and playback
-use browser Web Speech APIs. Missing model credentials produce an explicit "not
-configured" response rather than fabricated output.
+provider and model come from configuration. Speech providers sit behind the
+same kind of interface in `apps/api/app/ai/speech/`; `openai` is the only
+implemented STT/TTS provider, used only if `STT_PROVIDER`/`TTS_PROVIDER` is set
+to `openai` and an OpenAI credential is present. Browser Web Speech APIs remain
+the default voice capture/playback path regardless of server configuration.
+Missing model or speech credentials produce an explicit "not configured"
+response rather than fabricated output.
 
 ```python
 class LanguageModel(Protocol):
@@ -181,7 +184,8 @@ endpoint. The worker refuses `waiting_for_approval` tasks with
 `approval_required`; the task cancel route returns HTTP 409 (`not_cancellable`,
 "No active job to cancel") because no job exists. Although the shared helper
 allows transitions from `waiting_for_approval` to `executing` or `cancelled`,
-no user-facing approval or rejection flow invokes them.
+no user-facing approval or rejection flow invokes them. `waiting_for_approval`
+has no `expires_at` and is not expired.
 
 ### Durability rules
 
@@ -204,7 +208,8 @@ no user-facing approval or rejection flow invokes them.
 The supervisor marks high-risk plans as requiring approval. The task service
 persists these plans in `waiting_for_approval` without inserting a job. The
 approval decision flow is not implemented: there is no approve/reject endpoint,
-and the worker rejects `waiting_for_approval` with `approval_required`. No
+and the worker rejects `waiting_for_approval` with `approval_required`.
+`waiting_for_approval` has no `expires_at` and is not expired. No
 payload hash or exact-action approval binding is implemented. See the
 [security model](../security/SECURITY.md) for the risk classification.
 
@@ -216,8 +221,8 @@ The supervisor plans tasks into ordered steps. The worker checks permissions
 and runs each step; step results are stored in the task result. Agent registry
 entries describe capabilities but do not implement them or guarantee that a
 handler exists. Currently, Google integration steps perform read-only Gmail
-profile-total or Calendar-list requests. Other agent steps return a placeholder
-`<agent_id>: completed` result; they do not perform the advertised capability.
+profile-total or Calendar-list requests. Other agent steps fail with
+`agent_not_implemented`; they do not perform the advertised capability.
 
 ```mermaid
 flowchart LR
@@ -253,7 +258,7 @@ an exact category; it returns at most 100 non-deleted rows, ordered by
 Conversation context includes up to 10 active, non-deleted memories, ordered by
 `updated_at` descending. It does not filter on `privacy_class`, so memories
 tagged `sensitive` can be sent to the model when they fall within that limit.
-Memory CRUD requires a user action; there is no memory proposal-and-commit flow.
+Memory CRUD requires a user action. `POST /api/v1/memory` inserts an active row. There is no proposal, confirm, or reject route.
 
 ---
 
@@ -280,10 +285,10 @@ stored in PostgreSQL and scoped by user. Sync events support pull-based cursor
 replay; there is no local replica.
 
 The web app stores the access token in `sessionStorage` and sends it as a Bearer
-token. The refresh token is an HttpOnly cookie. Although the API has a refresh
-endpoint, the web client does not call it or retry failed requests with a new
-access token. A second device requires login; automatic refresh is not
-implemented.
+token. The refresh token is an HttpOnly cookie. On a 401 the client calls the
+refresh endpoint once, skips that call when the failing request is the refresh
+path itself, and shares one in-flight refresh across concurrent 401s. A second
+device still requires login.
 
 ---
 
@@ -320,7 +325,7 @@ Production infrastructure is not provisioned.
 | 4 | Memory CRUD and keyword search | Partial; no semantic retrieval or proposal-and-commit flow |
 | 5 | Agent orchestration | Partial; planning and validation exist, but most agent execution handlers are placeholders |
 | 6 | Durable task execution and worker | Implemented |
-| 7 | Browser voice interface | Implemented; no server-side STT/TTS provider |
+| 7 | Browser voice interface | Implemented. Batch server STT/TTS is wired into hold-to-talk. OpenAI Realtime WebRTC is a second mode. Gemini Live is not built. |
 | 8 | Gmail and Google Calendar OAuth | Implemented for profile-total and calendar-list reads only |
 | 9 | Notifications and automations | Implemented; in-app only |
 | 10 | Security hardening | Partial; see documented coverage gaps in [SECURITY.md](../security/SECURITY.md) |
@@ -402,27 +407,71 @@ spoken back. If the voice submit fails, the transcript is
 put back in the message field so it can be sent as text.
 
 `POST /api/v1/voice/speak` shortens a finished reply to the 240-character voice
-limit and returns the text plus a BCP-47 language tag. The browser speaks that
-text with its own speech synthesis. The response `audio` field is `null`: this
-API does not generate audio.
+limit and returns the text plus a BCP-47 language tag. If no TTS provider is
+configured, `audio` is `null` and the web client falls back to the browser's
+own speech synthesis, which is not an error. If `TTS_PROVIDER=openai` and an
+OpenAI credential is set, `audio` is a base64-encoded MP3 clip
+(`audio_format: "mp3"`) and the web client plays it via `playAudio()` in
+`apps/web/lib/speech.ts` instead of browser TTS. The web client calls
+`/speak` after every voice command reply (`submitVoice` in
+`apps/web/app/page.tsx`) and falls back to browser speech synthesis if the
+call fails or returns no audio.
+
+`POST /api/v1/voice/transcribe` accepts a multipart audio upload
+(`audio/webm`, `audio/wav`, `audio/mpeg`, `audio/mp4`, or `audio/ogg`, under
+10MB) and a `locale` field, and returns the transcript. It requires a
+configured STT provider and returns 503 `stt_not_configured` otherwise; the
+browser's own Web Speech recognition does not call this endpoint and is
+unaffected by whether it is configured. The web client's hold-to-talk control
+(`holdToTalk`/`releaseTalk` in `apps/web/app/page.tsx`) calls `/transcribe`
+when `stt_configured` (from `/api/v1/health`) is true and the browser
+supports `MediaRecorder`/`getUserMedia` (`recordingAvailable()` in
+`apps/web/lib/speech.ts`): holding the control starts a recording
+(`startRecording()`), releasing it stops the recording, uploads the resulting
+Blob via `api.transcribe()`, and submits the returned text as the voice
+command. If recording cannot start (e.g. microphone permission denied), or
+`stt_configured` is false, or `MediaRecorder`/`getUserMedia` is unsupported,
+it falls back to the existing browser `SpeechRecognition` capture path. If
+`/transcribe` itself fails after a recording completes, the client shows an
+error and the user can retry or type instead — no transcript is invented and
+no browser-recognition retry is attempted for that same hold (recording and
+recognition are not run concurrently).
 
 When the browser has no speech recognition, the client tells the user to type.
 That is the text fallback, and `text_fallback` is always true: typing remains
-valid even if a server speech credential is added later. A missing credential is
-reported separately. `stt_configured` and `tts_configured` are false on
-`/api/v1/health`, and no transcript is invented. A voice command whose locale is
-not English or Hindi is rejected with 422 before planning.
+valid regardless of server speech configuration. `stt_configured` and
+`tts_configured` on `/api/v1/health` reflect whether `STT_PROVIDER`/
+`TTS_PROVIDER` is set to an implemented provider (`openai`, today) and a
+matching OpenAI credential is present; a provider name set to anything else is
+reported as not configured rather than silently accepted. A vendor call that
+fails after its retries returns 503 `provider_error`, matching the pattern used
+by the model provider elsewhere in this API; no transcript or audio clip is
+invented. A voice command whose locale is not English or Hindi is rejected with
+422 before planning, and the same rule applies to `/transcribe` and `/speak`.
 
-### What is not implemented
+### Realtime session
 
-`STT_PROVIDER` and `TTS_PROVIDER` are accepted as configuration and reported in
-health, but no server-side provider implementation exists. The browser uses
-Web Speech APIs for recognition and synthesis; the API does not receive audio
-or generate speech.
-
-Wake-word activation is not possible under the zero-install constraint and is
-not built. No microphone permission is requested until the user holds the
-control.
+`POST /api/v1/voice/realtime/session` is the second voice mode. It requires the
+caller, checks that the caller owns `conversation_id`, and mints a short-lived
+OpenAI Realtime client secret. The response sets `provider: openai` and
+`transport: webrtc`. The long-lived provider key stays on the server.
+Missing speech configuration returns 503 `speech_not_configured`. A provider
+failure returns 503 `provider_error`.
+The web client calls `openRealtimePeer` only when the mint response has
+`transport: webrtc` and a `client_secret`. A 503 mint falls back to the batch
+or browser path. Any other mint failure sets the error and does not start the
+microphone. The peer opens the microphone only after that check, exchanges SDP
+with `https://api.openai.com/v1/realtime/calls`, and plays remote audio on the
+returned track.
+A committed turn calls `POST /api/v1/voice/realtime/tool`. That route accepts
+only `submit_command`, requires the same owned conversation, and submits the
+command to the assistant command gateway with `source: web`,
+`input_type: voice`, and the caller-supplied `Idempotency-Key`. It does not
+create a task itself. A replay of the same key returns the stored command
+result.
+Gemini Live is not implemented. Semantic voice-activity detection is not
+implemented. There is no wake word, and no microphone permission is requested
+until the user holds the control.
 
 ---
 

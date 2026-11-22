@@ -1,8 +1,8 @@
-"""Google OAuth for Gmail and Calendar. No call is made without a client id and secret.
+"""Google OAuth for Gmail and Calendar. Readiness requires OAuth and token encryption.
 
 The authorize URL is built locally. Exchanging a code, refreshing a token, and
-reading a profile are the only network calls. Each refuses when the credential
-is absent. A refused token request is not the same as a missing credential.
+reading a profile are the only network calls. Each refuses when the credentials
+it needs are absent. A refused token request is not a missing credential.
 """
 
 import base64
@@ -10,10 +10,11 @@ import hashlib
 from urllib.parse import urlencode
 
 import httpx
+from jarvis_shared.integrations import ProviderSpec
 
 from app.ai.base import NotConfigured, ProviderError
 from app.config import settings
-from jarvis_shared.integrations import ProviderSpec
+from app.integrations.crypto import configured as encryption_configured
 
 _AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN = "https://oauth2.googleapis.com/token"
@@ -21,12 +22,25 @@ _GMAIL_PROFILE = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 _CALENDAR_LIST = "https://www.googleapis.com/calendar/v3/users/me/calendarList"
 
 
+def credentials_configured() -> bool:
+    """Return whether both OAuth values are present and unpadded."""
+    client_id = settings.google_client_id
+    client_secret = settings.google_client_secret
+    return bool(
+        client_id
+        and client_secret
+        and client_id == client_id.strip()
+        and client_secret == client_secret.strip()
+    )
+
+
 def configured() -> bool:
-    return bool(settings.google_client_id and settings.google_client_secret)
+    """Return whether Google OAuth and encrypted token storage are ready."""
+    return credentials_configured() and encryption_configured()
 
 
 def require_configured() -> None:
-    if not configured():
+    if not credentials_configured():
         raise NotConfigured("Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
 
 

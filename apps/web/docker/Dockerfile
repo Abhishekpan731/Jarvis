@@ -10,6 +10,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# ---- production dependencies ----
+FROM node:20-alpine AS prod-deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 # ---- build ----
 FROM node:20-alpine AS build
 WORKDIR /app
@@ -30,8 +36,9 @@ RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 
 COPY --from=build --chown=nextjs:nodejs /app/public ./public
 COPY --from=build --chown=nextjs:nodejs /app/.next ./.next
-COPY --from=build --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=prod-deps --chown=nextjs:nodejs /app/node_modules ./node_modules
 COPY --from=build --chown=nextjs:nodejs /app/package.json ./package.json
+RUN npm prune --omit=dev --package-lock=false
 
 USER nextjs
 EXPOSE 3000

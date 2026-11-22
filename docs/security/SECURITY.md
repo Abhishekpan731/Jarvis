@@ -1,7 +1,7 @@
 # JARVIS — Security Model
 
 **Author**: Abhishek Pandey
-**Last Updated**: 2026-11-16
+**Last Updated**: 2026-11-22
 
 This document separates implemented controls from known gaps. Deployment
 configuration can add protections, but they are not assumed here.
@@ -23,7 +23,9 @@ flowchart LR
     end
 
     browser -->|Bearer token| api
-    ext -.->|untrusted model input/output| api
+    api -->|Model requests| ext
+    ext -.->|Model responses| api
+    worker -->|Read-only OAuth requests| ext
     ext -.->|OAuth responses| worker
     api --> db
     worker --> db
@@ -65,7 +67,8 @@ abstraction as a universal user-scoping control.
 
 When a plan requires approval, the task is stored with status
 `waiting_for_approval` and no job is created. There is no approve or reject
-endpoint, and exact-payload approval is not implemented. A waiting status is
+endpoint, and exact-payload approval is not implemented. `waiting_for_approval`
+has no `expires_at` and is not expired. A waiting status is
 not a completed user-approval workflow.
 
 `/api/v1/admin/overview` exists behind `ADMIN_TOKEN`. It is an operator
@@ -113,8 +116,10 @@ unknown fields are not universally rejected across request bodies.
 Login and registration are each limited to eight attempts per client IP in
 five minutes, using separate in-process counters. There is no per-user login
 or registration throttle, and refresh does not use this limiter. Selected task
-and assistant write routes have an in-process per-user limit of 30 requests
-per minute. The counters are not shared across processes.
+and assistant write routes, including the realtime tool route, have an
+in-process per-user limit of 30 requests per minute. The counters live in
+process memory. They are not backed by Redis or a shared table, and they are
+not shared across processes.
 
 Sources: `apps/api/app/routers/tasks/__init__.py`,
 `apps/api/app/routers/auth/__init__.py`, and `apps/api/app/limits/__init__.py`.
@@ -132,7 +137,7 @@ does not itself provide TLS.
   fallback and passes the minimum-length startup check. This is a
   production-blocking code/config risk.
 - **Approval workflow:** waiting tasks have no approve/reject endpoint or
-  exact-payload approval implementation.
+  exact-payload approval implementation. `waiting_for_approval` has no `expires_at` and is not expired.
 - **Data access:** RLS applies only to the specified tenant tables; there is no
   repository guarantee, and route handlers include direct SQL.
 - **Logging and rate limits:** redaction and counters are limited to the

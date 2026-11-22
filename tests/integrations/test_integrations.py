@@ -5,13 +5,17 @@ is a client error, not "not configured".
 """
 
 import uuid
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from app.config import settings
 from app.db import session_scope, set_tenant_guc
 from app.integrations.crypto import open_tokens, seal
+from app.models import Integration
+from app.routers import integrations
 from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from sqlalchemy import text
 
 
@@ -42,15 +46,151 @@ def google_ready(monkeypatch):
     monkeypatch.setattr(settings, "fernet_key", Fernet.generate_key().decode())
 
 
+class _EmptyResult:
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+    def scalar_one_or_none(self):
+        return None
+
+
+class _ReadinessSession:
+    async def execute(self, _statement):
+        return _EmptyResult()
+
+    def add(self, _row):
+        raise AssertionError("unconfigured connect must not create OAuth state")
+
+    async def commit(self):
+        raise AssertionError("unconfigured connect must not persist OAuth state")
+
+
+class _CallbackSession:
+    def __init__(self):
+        self.records = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def execute(self, _statement):
+        return _EmptyResult()
+
+    def add(self, record):
+        self.records.append(record)
+
+    async def commit(self):
+        self.commits += 1
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("google_client_id", ""),
+        ("google_client_secret", " "),
+        ("fernet_key", ""),
+        ("fernet_key", "not-a-fernet-key"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_connect_refuses_when_unconfigured(client, monkeypatch):
-    headers = await _register(client, "none")
-    monkeypatch.setattr(settings, "google_client_id", "")
-    monkeypatch.setattr(settings, "google_client_secret", "")
+async def test_readiness_and_connect_share_prerequisites_without_database(
+    google_ready, monkeypatch, setting, value
+):
+    monkeypatch.setattr(settings, setting, value)
+    user = SimpleNamespace(id=uuid.uuid4())
+    session = _ReadinessSession()
+
+    listed = await integrations.list_integrations(user=user, session=session)
+    assert all(item["configured"] is False for item in listed["integrations"])
+
+    with pytest.raises(HTTPException) as raised:
+        await integrations.connect("gmail", user=user, session=session)
+    assert raised.value.status_code == 503
+    assert raised.value.detail["error"]["code"] == "integration_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_callback_rolls_back_and_retries_when_encryption_is_unavailable(
+    google_ready, monkeypatch
+):
+    user = SimpleNamespace(id=uuid.uuid4())
+    oauth_state = SimpleNamespace(provider="gmail", user_id=user.id, code_verifier="verifier")
+
+    async def claim(_session, state, user_id):
+        assert state == "state"
+        assert user_id == user.id
+        return oauth_state
+
+    async def exchange(code, verifier):
+        assert code == "code"
+        assert verifier == "verifier"
+        return {"access_token": "test-access-token"}
+
+    monkeypatch.setattr("app.routers.integrations._claim_state", claim)
+    monkeypatch.setattr("app.routers.integrations.google.exchange_code", exchange)
+    valid_key = settings.fernet_key
+    monkeypatch.setattr(settings, "fernet_key", "not-a-fernet-key")
+    session = _CallbackSession()
+    body = integrations.CallbackIn(code="code", state="state")
+
+    with pytest.raises(HTTPException) as raised:
+        await integrations.callback(body=body, user=user, session=session)
+    assert raised.value.status_code == 503
+    assert session.rollbacks == 1
+    assert session.commits == 0
+    assert session.records == []
+
+    monkeypatch.setattr(settings, "fernet_key", valid_key)
+    connected = await integrations.callback(body=body, user=user, session=session)
+    assert connected == {"connected": True, "provider": "gmail"}
+    integration = next(record for record in session.records if isinstance(record, Integration))
+    assert "test-access-token" not in integration.token_ciphertext
+    assert open_tokens(integration.token_ciphertext)["access_token"] == "test-access-token"
+
+@pytest.mark.parametrize(
+    ("credential", "value"),
+    [
+        ("google_client_id", ""),
+        ("google_client_id", "   "),
+        ("google_client_id", " client-id "),
+        ("google_client_secret", ""),
+        ("google_client_secret", "   "),
+        ("google_client_secret", " client-secret "),
+    ],
+)
+@pytest.mark.asyncio
+async def test_readiness_rejects_blank_or_padded_google_credentials(
+    client, google_ready, monkeypatch, credential, value
+):
+    headers = await _register(client, "missing-google-credential")
+    monkeypatch.setattr(settings, credential, value)
+    listed = await client.get("/api/v1/integrations", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert all(item["configured"] is False for item in listed.json()["integrations"])
+
     response = await client.post("/api/v1/integrations/gmail/connect", headers=headers)
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "integration_not_configured"
 
+
+@pytest.mark.parametrize("fernet_key", ["", "not-a-fernet-key"])
+@pytest.mark.asyncio
+async def test_readiness_requires_valid_fernet_key(
+    client, google_ready, monkeypatch, fernet_key
+):
+    headers = await _register(client, "missing-fernet-key")
+    monkeypatch.setattr(settings, "fernet_key", fernet_key)
+    listed = await client.get("/api/v1/integrations", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert all(item["configured"] is False for item in listed.json()["integrations"])
+
+    response = await client.post("/api/v1/integrations/gmail/connect", headers=headers)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "integration_not_configured"
 
 @pytest.mark.asyncio
 async def test_connect_url_uses_pkce_and_hides_the_secret(client, google_ready):
@@ -115,6 +255,18 @@ async def test_callback_stores_ciphertext_and_blocks_other_users(client, google_
                 {"state": state},
             )
         ).one()
+        audit = (
+            await session.execute(
+                text(
+                    """
+                    select action, target_type, target_id from audit_logs
+                    where user_id = :user_id and action = 'integration_connect'
+                    """
+                ),
+                {"user_id": owner_id},
+            )
+        ).one()
+    assert tuple(audit) == ("integration_connect", "integration", "gmail")
     assert "ya29-secret" not in row.token_ciphertext
     opened = open_tokens(row.token_ciphertext)
     assert opened["access_token"] == "ya29-secret"
@@ -147,6 +299,36 @@ async def test_refused_code_is_not_reported_as_unconfigured(client, google_ready
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "token_exchange_failed"
 
+
+
+@pytest.mark.parametrize("fernet_key", ["", "not-a-fernet-key"])
+@pytest.mark.asyncio
+async def test_callback_keeps_state_retryable_when_encryption_is_unavailable(
+    client, google_ready, monkeypatch, fernet_key
+):
+    headers = await _register(client, "callback-fernet-error")
+    started = await client.post("/api/v1/integrations/gmail/connect", headers=headers)
+    state = parse_qs(urlparse(started.json()["authorize_url"]).query)["state"][0]
+    valid_key = settings.fernet_key
+
+    async def exchange(code: str, verifier: str) -> dict:
+        assert code == "abc"
+        assert verifier
+        return {"access_token": "test-access-token"}
+
+    monkeypatch.setattr("app.routers.integrations.google.exchange_code", exchange)
+    monkeypatch.setattr(settings, "fernet_key", fernet_key)
+    unavailable = await client.post(
+        "/api/v1/integrations/google/callback", headers=headers, json={"code": "abc", "state": state}
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.json()["error"]["code"] == "integration_not_configured"
+
+    monkeypatch.setattr(settings, "fernet_key", valid_key)
+    retried = await client.post(
+        "/api/v1/integrations/google/callback", headers=headers, json={"code": "abc", "state": state}
+    )
+    assert retried.status_code == 200, retried.text
 
 @pytest.mark.asyncio
 async def test_email_command_is_not_queued_without_a_connection(client):
@@ -207,5 +389,17 @@ async def test_disconnect_deletes_ciphertext(client, google_ready):
                 {"id": user_id},
             )
         ).one()
+        audit = (
+            await session.execute(
+                text(
+                    """
+                    select action, target_type, target_id from audit_logs
+                    where user_id = :user_id and action = 'integration_disconnect'
+                    """
+                ),
+                {"user_id": user_id},
+            )
+        ).one()
     assert row.status == "revoked"
     assert row.token_ciphertext is None
+    assert tuple(audit) == ("integration_disconnect", "integration", "google_calendar")

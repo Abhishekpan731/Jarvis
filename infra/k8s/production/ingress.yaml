@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jarvis
+  namespace: jarvis
+spec:
+  # Example-only host and externally managed TLS Secret; no live host or certificate is supplied.
+  tls:
+    - hosts:
+        - jarvis.example.invalid
+      secretName: jarvis-ingress-tls
+  rules:
+    - host: jarvis.example.invalid
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 3000

@@ -5,8 +5,13 @@ Assistant were invoked on a physical device.
 """
 
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
+import app.routers.assistant as assistant_router
 import pytest
+from app.ai.schemas import Plan
+from fastapi import HTTPException
 
 
 async def _register(client, name: str) -> dict:
@@ -59,10 +64,16 @@ async def test_command_is_planned_and_synced_across_devices(client):
 
     own = await client.get("/api/v1/sync", headers=phone)
     events = own.json()["events"]
-    assert len(events) == 1
-    assert events[0]["kind"] == "command.accepted"
-    assert events[0]["payload"]["task_id"] == body["task_id"]
-    assert events[0]["device_id"] == device_id
+    assert [event["kind"] for event in events] == [
+        "conversation.created",
+        "conversation.updated",
+        "message.created",
+        "message.created",
+        "command.accepted",
+    ]
+    assert events[-1]["payload"]["task_id"] == body["task_id"]
+    assert events[-1]["device_id"] == device_id
+    assert events[2]["payload"]["message"]["content"] == "research compare the two libraries"
 
     # Replaying from the cursor returns nothing new; the cursor is stable.
     again = await client.get("/api/v1/sync", headers=phone, params={"after": own.json()["cursor"]})
@@ -106,6 +117,14 @@ async def test_idempotent_replay_and_device_revocation(client):
         json={"command": "research compare the two libraries", "device_id": device_id},
     )
     assert first.json()["task_id"] == second.json()["task_id"]
+    synced = await client.get("/api/v1/sync", headers=headers)
+    assert [event["kind"] for event in synced.json()["events"]] == [
+        "conversation.created",
+        "conversation.updated",
+        "message.created",
+        "message.created",
+        "command.accepted",
+    ]
 
     revoked = await client.delete(f"/api/v1/devices/{device_id}", headers=headers)
     assert revoked.json()["revoked"] is True
@@ -173,3 +192,126 @@ async def test_unconfigured_api_source_does_not_invent_a_handoff(client):
     assert body["task_id"] is None
     assert body["status"] == "accepted"
 
+
+
+class _CommandSession:
+    def __init__(self, conversation, replay_store):
+        self.conversation = conversation
+        self.replay_store = replay_store
+        self.added = []
+        self.commits = 0
+
+    async def execute(self, _statement, parameters):
+        result = self.replay_store.get((parameters["user_id"], parameters["key"]))
+        row = {"payload": {"result": result}} if result is not None else None
+        mapping = SimpleNamespace(one_or_none=lambda: row)
+        return SimpleNamespace(mappings=lambda: mapping)
+
+    async def get(self, model, row_id):
+        if model is assistant_router.Conversation and row_id == self.conversation.id:
+            return self.conversation
+        return None
+
+    def add(self, item):
+        self.added.append(item)
+        if isinstance(item, assistant_router.SyncEvent) and item.kind == "command.idempotency":
+            self.replay_store[(item.user_id, item.payload["key"])] = item.payload["result"]
+
+    async def flush(self):
+        for item in self.added:
+            if isinstance(item, assistant_router.Message) and item.created_at is None:
+                item.created_at = datetime.now(UTC)
+
+    async def commit(self):
+        self.commits += 1
+
+
+class _AccountLimiter:
+    def __init__(self):
+        self.counts = {}
+        self.calls = []
+
+    async def limit(self, user_id):
+        self.calls.append(user_id)
+        if self.counts.get(user_id, 0) >= 1:
+            raise HTTPException(429, "limited")
+        self.counts[user_id] = self.counts.get(user_id, 0) + 1
+
+
+def _configure_command_stubs(monkeypatch, limiter):
+    async def plan(_model, _command):
+        return Plan(
+            intent="conversation", requires_execution=False, agents=[], risk="low",
+            requires_approval=False, steps=[], direct_answer="Acknowledged.",
+        ), None
+
+    monkeypatch.setattr(assistant_router, "limit_writes_durable", limiter.limit)
+    monkeypatch.setattr(
+        assistant_router, "get_model", lambda: SimpleNamespace(name="test", model="test-model")
+    )
+    monkeypatch.setattr(assistant_router, "plan_request", plan)
+
+
+def _command_session(user_id, replay_store):
+    conversation = SimpleNamespace(
+        id=uuid.uuid4(), user_id=user_id, deleted_at=None, title="Assistant",
+        status="active", created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+    )
+    return _CommandSession(conversation, replay_store)
+
+
+@pytest.mark.asyncio
+async def test_command_replay_does_not_consume_another_limit_slot(monkeypatch):
+    limiter = _AccountLimiter()
+    _configure_command_stubs(monkeypatch, limiter)
+    owner_id = uuid.uuid4()
+    session = _command_session(owner_id, {})
+    body = assistant_router.CommandIn(
+        command="say hello", conversation_id=session.conversation.id
+    )
+
+    first = await assistant_router.submit_command(
+        body, SimpleNamespace(id=owner_id), session, "retry-key"
+    )
+    write_count = len(session.added)
+    replay = await assistant_router.submit_command(
+        body, SimpleNamespace(id=owner_id), session, "retry-key"
+    )
+
+    assert replay == first
+    assert len(session.added) == write_count
+    assert session.commits == 1
+    assert limiter.calls == [owner_id]
+
+
+@pytest.mark.asyncio
+async def test_command_limit_is_owner_scoped_and_returns_429(monkeypatch):
+    limiter = _AccountLimiter()
+    _configure_command_stubs(monkeypatch, limiter)
+    owner_id, other_id = uuid.uuid4(), uuid.uuid4()
+    replay_store = {}
+    owner_session = _command_session(owner_id, replay_store)
+    other_session = _command_session(other_id, replay_store)
+
+    first = await assistant_router.submit_command(
+        assistant_router.CommandIn(
+            command="say hello", conversation_id=owner_session.conversation.id
+        ), SimpleNamespace(id=owner_id), owner_session, "shared-key"
+    )
+    other = await assistant_router.submit_command(
+        assistant_router.CommandIn(
+            command="say hello", conversation_id=other_session.conversation.id
+        ), SimpleNamespace(id=other_id), other_session, "shared-key"
+    )
+
+    write_count = len(owner_session.added)
+    with pytest.raises(HTTPException) as caught:
+        await assistant_router.submit_command(
+            assistant_router.CommandIn(command="new command"),
+            SimpleNamespace(id=owner_id), owner_session, "new-key"
+        )
+    assert len(owner_session.added) == write_count
+    assert owner_session.commits == 1
+    assert other["conversation_id"] != first["conversation_id"]
+    assert caught.value.status_code == 429
+    assert limiter.calls == [owner_id, other_id, owner_id]

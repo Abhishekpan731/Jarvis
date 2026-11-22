@@ -57,6 +57,8 @@ async def build_context(
                 select(Memory)
                 .where(
                     Memory.user_id == conversation.user_id,
+                    Memory.status == "confirmed",
+                    Memory.privacy_class == "normal",
                     Memory.active.is_(True),
                     Memory.deleted_at.is_(None),
                 )

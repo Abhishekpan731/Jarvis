@@ -1,21 +1,24 @@
 """Phase 10 checks. Retrieved text is data. A step cannot grant itself a permission."""
 
+import asyncio
 import uuid
 
 import pytest
 from app.ai.schemas import Plan, PlanStep
 from app.ai.supervisor import validate_plan
 from app.ai.untrusted import quote
-from app.db import session_scope, set_tenant_guc, set_worker_guc
+from app.config import Settings, settings
+from app.db import get_session, session_scope, set_tenant_guc
 from app.execution import execute_task
-from app.jobs import insert_job
-from app.limits import limit_writes, reset
-from app.models import Device, Memory, Task, TaskEvent, TaskStep, User
-from app.security import hash_password, refresh_cookie, verify_password
-from app.security import _hasher
+from app.limits import DurableWriteLimiter, limit_writes, limit_writes_durable, reset
+from app.main import _validate_production_jwt_secret, app
+from app.models import Device, Memory, Task, TaskStep, User
+from app.security import _hasher, hash_password, refresh_cookie, verify_password
+from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from jarvis_shared.agents import action_allowed
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 
 def test_retrieved_text_cannot_forge_a_role():
@@ -83,6 +86,8 @@ def test_write_limit_is_per_account():
 @pytest.mark.asyncio
 async def test_health_refuses_framing_and_sniffing(client):
     response = await client.get("/api/v1/health")
+    assert response.status_code == 200
+    assert response.json()["database"] == "ok"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
@@ -146,34 +151,6 @@ async def test_cross_tenant_select_returns_nothing_even_without_an_app_filter():
     assert rows == []
 
 
-@pytest.mark.asyncio
-async def test_worker_escape_hatch_allows_cross_tenant_queue_claiming():
-    """app.worker is a narrow, intentional bypass for the queue tables only.
-    A transaction that sets only the worker GUC (no tenant scope at all)
-    can still see and claim a job owned by a different tenant."""
-    user_id = await _make_user(uuid.uuid4())
-    task_id = uuid.uuid4()
-    async with session_scope() as session:
-        await set_tenant_guc(session, user_id)
-        session.add(Task(id=task_id, user_id=user_id, title="t", instruction="t", status="created"))
-        session.add(
-            TaskEvent(task_id=task_id, from_status=None, to_status="created", reason="t", actor="t")
-        )
-        await session.flush()
-        job_id = await insert_job(session, user_id=user_id, task_id=task_id)
-        await session.commit()
-
-    async with session_scope() as session:
-        # Only the worker GUC: no app.user_id at all, no relation to the
-        # job's owning tenant.
-        await set_worker_guc(session)
-        row = (
-            await session.execute(text("SELECT id, user_id FROM jobs WHERE id = :id"), {"id": job_id})
-        ).mappings().one_or_none()
-    assert row is not None
-    assert row["id"] == job_id
-    assert row["user_id"] == user_id
-
 
 @pytest.mark.asyncio
 async def test_scoping_to_one_tenant_hides_another_tenants_memories_and_devices():
@@ -229,3 +206,174 @@ def test_password_hash_round_trips_and_rejects_the_wrong_password():
     digest = hash_password("correct horse battery staple")
     assert verify_password(digest, "correct horse battery staple") is True
     assert verify_password(digest, "wrong password") is False
+
+
+@pytest.mark.asyncio
+async def test_health_reports_unavailable_when_database_probe_fails(client):
+    class UnavailableSession:
+        async def execute(self, _statement):
+            raise SQLAlchemyError("database probe failed")
+
+    async def unavailable_session():
+        yield UnavailableSession()
+
+    previous_override = app.dependency_overrides.get(get_session)
+    app.dependency_overrides[get_session] = unavailable_session
+    try:
+        response = await client.get("/api/v1/health")
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(get_session, None)
+        else:
+            app.dependency_overrides[get_session] = previous_override
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "dependency_unavailable",
+            "message": "A required service is unavailable.",
+        }
+    }
+    assert "database probe failed" not in response.text
+
+
+def test_production_startup_rejects_unset_jwt_secret(monkeypatch):
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.delenv("jwt_secret", raising=False)
+    with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        _validate_production_jwt_secret(
+            Settings(_env_file=None, app_env="production")
+        )
+
+
+def test_production_startup_rejects_the_explicit_default_jwt_secret():
+    default_secret = Settings.model_fields["jwt_secret"].default
+    with pytest.raises(RuntimeError, match="JWT_SECRET") as caught:
+        _validate_production_jwt_secret(
+            Settings(_env_file=None, app_env="production", jwt_secret=default_secret)
+        )
+    assert default_secret not in str(caught.value)
+
+
+def test_production_startup_rejects_empty_and_development_jwt_secrets():
+    with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        _validate_production_jwt_secret(Settings(app_env="production", jwt_secret=""))
+    for dev_prefix in ("development-", "dev-secret-"):
+        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+            _validate_production_jwt_secret(
+                Settings(app_env="production", jwt_secret=dev_prefix + "x" * 48)
+            )
+
+
+def test_production_startup_accepts_a_long_configured_jwt_secret():
+    _validate_production_jwt_secret(
+        Settings(app_env="production", jwt_secret="safe-test-value-" + "x" * 48)
+    )
+
+
+def test_production_startup_rejects_a_short_jwt_secret():
+    with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        _validate_production_jwt_secret(
+            Settings(_env_file=None, app_env="production", jwt_secret="x" * 31)
+        )
+
+
+@pytest.mark.asyncio
+async def test_durable_write_limit_is_shared_across_instances_and_restart():
+    user_id = uuid.uuid4()
+    first_process = DurableWriteLimiter()
+    second_process = DurableWriteLimiter()
+
+    outcomes = await asyncio.gather(
+        first_process.limit(user_id, limit=1),
+        second_process.limit(user_id, limit=1),
+        return_exceptions=True,
+    )
+    assert sum(outcome is None for outcome in outcomes) == 1
+    failures = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    assert len(failures) == 1 and failures[0].status_code == 429
+
+    restarted_process = DurableWriteLimiter()
+    with pytest.raises(Exception) as caught:
+        await restarted_process.limit(user_id, limit=1)
+    assert caught.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_durable_write_wrapper_is_owner_scoped_without_database(monkeypatch):
+    class IsolatedLimiter:
+        def __init__(self):
+            self.counts = {}
+
+        async def limit(self, user_id, *, limit=30):
+            count = self.counts.get(user_id, 0)
+            if count >= limit:
+                raise HTTPException(429, "limited")
+            self.counts[user_id] = count + 1
+
+    limiter = IsolatedLimiter()
+    monkeypatch.setattr("app.limits._DURABLE_LIMITER", limiter)
+    owner_id, other_id = uuid.uuid4(), uuid.uuid4()
+
+    await limit_writes_durable(owner_id, limit=1)
+    with pytest.raises(HTTPException) as caught:
+        await limit_writes_durable(owner_id, limit=1)
+    await limit_writes_durable(other_id, limit=1)
+
+    assert caught.value.status_code == 429
+    assert limiter.counts == {owner_id: 1, other_id: 1}
+
+
+def test_cors_origins_default_to_localhost():
+    assert Settings(_env_file=None).cors_origin_allowlist == ["http://localhost:3000"]
+
+
+@pytest.mark.parametrize(
+    ("configured_origins", "expected_origins"),
+    [
+        ("https://web.example.com", ["https://web.example.com"]),
+        (
+            " https://web.example.com , https://admin.example.com ",
+            ["https://web.example.com", "https://admin.example.com"],
+        ),
+    ],
+)
+def test_cors_origins_parse_single_and_split_values(configured_origins, expected_origins):
+    assert Settings(
+        _env_file=None, cors_origins=configured_origins
+    ).cors_origin_allowlist == expected_origins
+
+
+def test_cors_origins_read_runtime_environment(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGINS", "https://web.example.com,https://api.example.com")
+    assert Settings(_env_file=None).cors_origin_allowlist == [
+        "https://web.example.com",
+        "https://api.example.com",
+    ]
+
+
+@pytest.mark.parametrize(
+    "configured_origins",
+    [
+        "*",
+        "https://*.example.com",
+        "ftp://web.example.com",
+        "https://web.example.com/path",
+        "https://web.example.com:invalid",
+        "https://web..example.com",
+        "https://web.example.com,",
+    ],
+)
+def test_cors_origins_reject_wildcards_and_malformed_values(configured_origins):
+    with pytest.raises(ValueError, match="CORS_ORIGINS"):
+        Settings(_env_file=None, cors_origins=configured_origins)
+
+
+def test_cors_middleware_uses_parsed_allowlist_with_credentials():
+    cors_middleware = next(
+        middleware
+        for middleware in app.user_middleware
+        if middleware.cls is CORSMiddleware
+    )
+    assert cors_middleware.kwargs["allow_origins"] == settings.cors_origin_allowlist
+    assert cors_middleware.kwargs["allow_credentials"] is True

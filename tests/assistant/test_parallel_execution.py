@@ -5,7 +5,6 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-
 from app.execution import execute_tasks
 from app.models import Task, TaskStep
 from app.seed import DEMO_TASKS

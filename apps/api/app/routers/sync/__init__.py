@@ -5,7 +5,7 @@ has seen and receives everything newer, scoped to its own user. Reconnecting
 after a gap replays the missed events, and asking twice returns the same rows.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
 async def sync(
     user: User = Depends(require_user),
     session: AsyncSession = Depends(get_session),
-    after: int = 0,
+    after: int = Query(default=0, ge=0),
     limit: int = 100,
 ) -> dict:
     limit = max(1, min(limit, 500))

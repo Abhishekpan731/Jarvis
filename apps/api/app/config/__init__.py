@@ -1,21 +1,90 @@
 """Runtime configuration, read from the environment and nowhere else."""
 
+import re
+from ipaddress import ip_address
+from urllib.parse import urlsplit
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+
+
+def _is_valid_hostname(hostname: str) -> bool:
+    """Return whether a URL hostname is an IP address or valid DNS name."""
+    try:
+        ip_address(hostname)
+        return True
+    except ValueError:
+        dns_name = hostname.removesuffix(".")
+        labels = dns_name.split(".")
+        return len(dns_name) <= 253 and all(
+            _HOST_LABEL.fullmatch(label) is not None for label in labels
+        )
+
+
+def _parse_cors_origins(value: str) -> list[str]:
+    """Parse specific HTTP(S) origins from the CORS_ORIGINS setting."""
+    origins = [origin.strip() for origin in value.split(",")]
+    if not origins or any(not origin for origin in origins):
+        raise ValueError("CORS_ORIGINS must contain a comma-separated list of origins.")
+
+    for origin in origins:
+        if "*" in origin or any(character.isspace() for character in origin):
+            raise ValueError("CORS_ORIGINS must contain specific origins without wildcards.")
+        try:
+            parsed = urlsplit(origin)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("CORS_ORIGINS contains a malformed origin.") from exc
+
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "?" in origin
+            or "#" in origin
+            or parsed.netloc.endswith(":")
+            or (port is not None and not 0 <= port <= 65535)
+            or not _is_valid_hostname(hostname)
+        ):
+            raise ValueError("CORS_ORIGINS contains a malformed HTTP(S) origin.")
+    return origins
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "development"
+    cors_origins: str = "http://localhost:3000"
+
+    @field_validator("cors_origins")
+    @classmethod
+    def validate_cors_origins(cls, value: str) -> str:
+        """Reject wildcard and malformed CORS origins at configuration load."""
+        _parse_cors_origins(value)
+        return value
+
+    @property
+    def cors_origin_allowlist(self) -> list[str]:
+        """Return the validated, trimmed CORS origin allowlist."""
+        return _parse_cors_origins(self.cors_origins)
     log_level: str = "INFO"
 
-    # Runtime connection. Must be the non-owner `jarvis_app` role so Postgres
-    # RLS is actually evaluated (table owners bypass RLS unless FORCED, but a
-    # non-owner role is subject to it regardless). Migrations run separately
-    # as the owner role `jarvis` via DATABASE_URL_SYNC / alembic.ini.
+    # Empty disables OTLP tracing; BaseSettings reads OTEL_EXPORTER_OTLP_ENDPOINT.
+    otel_exporter_otlp_endpoint: str = ""
+
+    # API runtime role. Migrations run separately as the owner role `jarvis`.
     database_url: str = (
         "postgresql+asyncpg://jarvis_app:change-me-app@localhost:5433/jarvis"
     )
+    # Required by worker_session_scope; never falls back to the API credential.
+    worker_database_url: str = ""
     redis_url: str = "redis://localhost:6380/0"
 
     jwt_secret: str = "dev-only-secret-change-me-not-for-production"
@@ -41,10 +110,14 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
 
-    # Optional server-side speech. Empty means the browser captures and speaks,
-    # and the API reports speech as not configured rather than inventing audio.
+    # Optional server-side speech, in addition to the browser capture/playback
+    # path. "openai" is the only implemented provider; any other non-empty
+    # value is reported as configured but fails with NotConfigured at call time.
     stt_provider: str = ""
     tts_provider: str = ""
+    openai_stt_model: str = "gpt-4o-mini-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "alloy"
 
     # OAuth. Empty client id or secret means that provider is not configured.
     # Tokens are refused rather than stored in plaintext when FERNET_KEY is empty.

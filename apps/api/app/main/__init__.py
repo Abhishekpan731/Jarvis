@@ -1,13 +1,17 @@
 """JARVIS API entry point."""
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider_factory import provider_status
 from app.ai.speech import speech_status
-from app.config import settings
+from app.config import Settings, settings
+from app.db import get_session
 from app.routers import (
     admin,
     assistant,
@@ -22,8 +26,36 @@ from app.routers import (
     voice,
 )
 
-if settings.app_env == "production" and len(settings.jwt_secret) < 32:
-    raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
+
+def _validate_production_jwt_secret(config: Settings) -> None:
+    """Reject absent, default, and development JWT secrets in production."""
+    if config.app_env != "production":
+        return
+
+    secret = config.jwt_secret.strip()
+    default_secret = Settings.model_fields["jwt_secret"].default
+    development_markers = (
+        "dev-",
+        "development",
+        "change-me",
+        "changeme",
+        "replace-me",
+        "placeholder",
+        "example",
+        "default",
+    )
+    if (
+        len(secret) < 32
+        or secret.casefold() == default_secret.casefold()
+        or any(marker in secret.casefold() for marker in development_markers)
+    ):
+        raise RuntimeError(
+            "JWT_SECRET must be explicitly configured with a non-development "
+            "secret of at least 32 characters in production."
+        )
+
+
+_validate_production_jwt_secret(settings)
 
 app = FastAPI(title="JARVIS", version="0.2.0")
 
@@ -45,7 +77,7 @@ async def security_headers(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origin_allowlist,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,5 +117,23 @@ async def validation_error(_request: Request, exc: RequestValidationError) -> JS
 
 
 @app.get("/api/v1/health")
-async def health() -> dict:
-    return {"status": "ok", "ai": provider_status(), "speech": speech_status()}
+async def health(session: AsyncSession = Depends(get_session)) -> dict:
+    """Report API readiness only after the required database responds."""
+    try:
+        await session.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "code": "dependency_unavailable",
+                    "message": "A required service is unavailable.",
+                }
+            },
+        )
+    return {
+        "status": "ok",
+        "database": "ok",
+        "ai": provider_status(),
+        "speech": speech_status(),
+    }

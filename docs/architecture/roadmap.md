@@ -1,7 +1,7 @@
 # JARVIS — Implementation Roadmap
 
 **Author**: Abhishek Pandey
-**Last Updated**: 2026-11-21
+**Last Updated**: 2026-11-22
 
 Each phase ends with working, tested software and updated documentation. A
 phase is not done because code was written; it is done because its tests pass.
@@ -17,10 +17,10 @@ live or production deployment.
 
 | Feature         | Existing implementation                                                                                                                                                                                                                                                        | Verified                                                                                                                | Remaining work                                                                                                |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Authentication  | Register, login, logout, API refresh with rotation and family revocation, session lookup, password change, soft account deletion. Argon2id, HttpOnly refresh cookie, in-process login throttle. Password change and deletion revoke every session for the account. The web client refreshes once on a 401, skips the refresh path, and shares one in-flight refresh. | Yes. `tests/security/test_auth.py` and `tests/security/test_review_regressions.py`, against PostgreSQL. Client refresh helpers are in `apps/web/lib/api.ts`. | Redis-backed rate limiting. Hard deletion of user data. |
+| Authentication  | Register, login, logout, API refresh with rotation and family revocation, session lookup, password change, soft account deletion. Argon2id, HttpOnly refresh cookie, in-process login throttle. Password change and deletion revoke every session for the account. The web client refreshes once on a 401, skips the refresh path, and shares one in-flight refresh. | Yes. `tests/security/test_auth.py` and `tests/security/test_review_regressions.py`, against PostgreSQL. Client refresh helpers are in `apps/web/lib/api.ts`. | A durable rate limiter. Hard deletion of user data. |
 | Database        | PostgreSQL 16 with pgvector; migrations `0001` through `0009` are checked in. `0009` creates the non-owner `jarvis_app` runtime role, forces RLS on tenant-owned tables, and adds `WITH CHECK` policies.                                                                 | `tests/security/test_security.py` defines coverage for fail-closed RLS, cross-tenant reads of memories/devices, worker-GUC SELECT visibility of a foreign job, and rejection of a cross-tenant task insert. This review did not verify the live DB version; the prior row recorded `0005`. | Verify deployment DBs applied `0009`; expand coverage for joined-table and non-queue worker-GUC boundaries. |
 | Agents          | 18 agents in `jarvis_shared.agents` and seeded by migration `0001`.                                                                                                                                                                                                            | Yes. `select count(*) from agents` returns 18. Registry import returns 18.                                              | No idempotent re-seed command. The migration inserts once; a second run is a no-op because Alembic tracks it. |
-| Task execution  | Durable PostgreSQL queue. The task helper defines legal transitions; the worker claims queued jobs with leases and fencing. High-risk tasks are saved as `waiting_for_approval` without a job. No approve/reject endpoint exists; the worker rejects that status, and cancellation returns 409 when no active job exists. Google integration steps perform limited read-only requests; other agent steps currently fail with `agent_not_implemented` rather than performing their advertised capability. | Yes. `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`. CI runs `alembic upgrade head` and `python -m pytest` against a Postgres 16 service on pull requests and pushes to `main`. | Implement approval decisions and a supported cancellation path for waiting tasks (the current route returns 409). |
+| Task execution  | Durable PostgreSQL queue. The task helper defines legal transitions; the worker claims queued jobs with leases and fencing. High-risk tasks are saved as `waiting_for_approval` without a job. No approve/reject endpoint exists; the worker rejects that status, and cancellation returns 409 when no active job exists. Google integration steps perform limited read-only requests; other agent steps currently fail with `agent_not_implemented` rather than performing their advertised capability. | Yes. `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`. CI is defined to run `alembic upgrade head` and `python -m pytest` against a Postgres 16 service on pull requests and pushes to `main`. This review did not run that workflow. | Implement approval decisions and a supported cancellation path for waiting tasks (the current route returns 409). |
 | Frontend        | Next.js app in `apps/web`: sign in, register, conversation list, streaming chat, stop control, hold-to-talk, English/Hindi switch.                                                                                                                                             | Partially. `tsc` not re-run this phase. No browser test was run.                                                        | Rename and delete exist in the API client but not in the UI. Microphone use is untested on a device.          |
 | AI integration  | Provider interface, OpenAI implementation, factory that reports unconfigured instead of inventing a reply.                                                                                                                                                                     | Partially. Missing-key path verified: health reports `configured: false` and messaging returns 503 `ai_not_configured`. | No live call was made. No `OPENAI_API_KEY` is set.                                                            |
 | Voice           | Browser Web Speech APIs provide push-to-talk, English and Hindi, and text fallback. A transcript is submitted to `POST /api/v1/assistant/commands` (`source: web`, `input_type: voice`). Unsupported voice locales are rejected. Typed chat is not spoken. No wake word. `POST /api/v1/voice/transcribe` and audio on `POST /api/v1/voice/speak` provide batch server-side STT/TTS when `STT_PROVIDER`/`TTS_PROVIDER=openai` and a credential is set. The web client calls `/speak` and plays returned audio, falling back to browser synthesis when none is returned. When `stt_configured` is true and recording is available, hold-to-talk records and calls `/transcribe`; it falls back to browser recognition if recording cannot start. A realtime session is a second mode: `POST /api/v1/voice/realtime/session` mints a short-lived OpenAI Realtime client secret after the caller owns the conversation. The browser opens WebRTC only when that response has `transport: webrtc` and a `client_secret`. A 503 mint falls back to the batch path. Any other mint failure surfaces the error and does not start the microphone. Committed turns call `POST /api/v1/voice/realtime/tool`, which submits `submit_command` through the command gateway with the caller-supplied idempotency key. | Yes. `tests/integrations/test_voice.py` covers transcribe, speak, realtime session, and realtime tool, including owner isolation and stubbed-provider failures. Browser capture, the client wiring, and a live OpenAI call were not exercised by an automated web test. | Browser reliability measurement (Phase 7a). Gemini Live, semantic VAD, and native speech-to-speech are not built (Phases 7c–7d). |
@@ -28,14 +28,15 @@ live or production deployment.
 | Command gateway | `POST /api/v1/assistant/commands` accepts a source-tagged contract (`siri`, `google_assistant`, `web`, `desktop`, `api`), normalizes it, and routes it through the shared planner. A device id is attribution, never authentication.                                           | Yes. `tests/assistant/test_assistant.py`, 4 tests, against PostgreSQL.                                                            | Not exercised from a physical Siri or Google Assistant device.                                                |
 | Devices         | `devices` table with registration, per-device revocation, and last-seen tracking. Revoking a device blocks further commands attributed to it.                                                                                                                                  | Yes. `tests/assistant/test_assistant.py`.                                                                                         | No push transport (APNs/FCM). A client can poll `/api/v1/sync`; the current web UI does not.                                                    |
 | Sync            | Durable `sync_events` log with cursor replay at `GET /api/v1/sync`. Scoped per user; idempotency rows are excluded from the feed.                                                                                                                                              | Yes. `tests/assistant/test_assistant.py` covers replay and cross-account isolation.                                               | No live SSE push. Replay is pull-based.                                                                       |
-| Memory          | Table, CRUD API, keyword search, privacy class, active flag. Updates re-validate the privacy class.                                                                                                                                                                            | No. Endpoints exist; no test covers them.                                                                               | No embeddings are generated. The `embedding` column is empty.                                                 |
+| Memory          | Table, CRUD API, keyword search, privacy class, active flag. `POST /api/v1/memory` inserts an active row. No proposal, confirm, or reject route exists.                                                                                                                                                                            | No. Endpoints exist; no test covers them.                                                                               | No embeddings are generated. The `embedding` column is empty.                                                 |
 | Streaming       | SSE endpoint emitting `response.started`, `text.delta`, `response.completed`, `error`.                                                                                                                                                                                         | No. Code reviewed, not exercised against a provider.                                                                    | Needs a configured provider to verify end to end.                                                             |
 | Integrations    | Gmail and Google Calendar OAuth connection flow with PKCE, single-use state, and Fernet ciphertext. Gmail reads the profile message total; Calendar reads the calendar list. No mail content, mail sending, or calendar writes are implemented. | Yes. `tests/integrations/test_integrations.py` and the email-step case in `tests/jobs/test_worker_recovery.py`. No live Google call was made.  | Configure a Google client to test live reads. No `GOOGLE_CLIENT_ID` is set.          |
 
 ### What is explicitly not done
 
-- Semantic memory retrieval. `memories.embedding` is a `vector(1536)` column. `POST /api/v1/memory` writes category, content, privacy class, and active state. It does not write the embedding. Retrieval is `ILIKE` or an exact category match, capped at 100 rows.
-- High-risk task approval decisions. Such tasks are stored without jobs; no approve/reject endpoint exists, and the worker refuses to run them. `waiting_for_approval` is not expired.
+- Semantic memory retrieval. `memories.embedding` is a `vector(1536)` column. Nothing writes it, and no query reads it. `POST /api/v1/memory` writes category, content, privacy class, and an active row. Retrieval is `ILIKE` or an exact category match, capped at 100 rows.
+- Memory proposals. There is no proposal, confirm, or reject route. `POST /api/v1/memory` inserts an active row.
+- High-risk task approval decisions. Such tasks are stored without jobs; no approve/reject endpoint exists, and the worker refuses to run them. `waiting_for_approval` has no `expires_at` and is not expired.
 - Wake word and local device control. Impossible under the zero-install constraint.
 - Gemini Live, semantic voice-activity detection, and native speech-to-speech. The OpenAI Realtime WebRTC path above is the only realtime mode.
 - Server-side STT and TTS for any provider other than OpenAI. `get_transcriber()` and `get_synthesizer()` raise `NotConfigured` unless the matching provider is `openai` and a credential is set.
@@ -71,10 +72,9 @@ interface, streaming responses over SSE, a working chat view. Requires an
 OpenAI-compatible credential; without one the UI shows "not configured" rather
 than a canned reply.
 
-## Phase 4 — Persistent memory
+## Phase 4 — Persistent memory (partial)
 
-Memory CRUD, keyword and semantic retrieval, the proposal-then-commit rule so
-nothing is remembered without confirmation, privacy classes, export and delete.
+Memory CRUD, keyword retrieval, privacy classes, and soft delete exist. Semantic retrieval does not: the `embedding` column is empty, and no query reads it. `POST /api/v1/memory` inserts an active row. There is no proposal, confirm, or reject route, so the proposal-then-commit rule is not implemented. Export of a single memory is not a separate route; delete is a soft delete.
 
 ## Phase 5 — Agent orchestration
 
@@ -88,7 +88,7 @@ The worker process claims from a PostgreSQL job table with `FOR UPDATE SKIP
 LOCKED`, holds a lease it heartbeats, and reaps expired leases according to the
 attempt policy. Cancellation and idempotency keys are in place. Covered by
 `tests/jobs/test_durable_jobs.py` and `tests/jobs/test_worker_recovery.py`. The queue is
-PostgreSQL, not Redis; Redis remains available for a future rate limiter.
+PostgreSQL, not Redis. The app has no Redis client and no Redis-backed limiter. The write limiter is in-process (`apps/api/app/limits.py`) and a restart clears it.
 
 ## Phase 7 — Voice
 
@@ -430,16 +430,15 @@ gaps in [SECURITY.md](../security/SECURITY.md).
 - Retrieved memory and conversation summaries are quoted as data before they
   reach a model. A forged `system:` line is relabelled and cannot become a role.
 - A step whose agent is not in the registry, or whose action names another
-  agent's permission, fails before the runner. An ordinary sentence for a
-  registered agent still runs.
+  agent's permission, fails before the runner. A registered agent other than
+  the Google integration still fails in `apps/api/app/integrations/runner/__init__.py` with `agent_not_implemented`.
 - Task creation and assistant commands share a per-account write limit. A
   restart clears it. Login throttling is separate.
 - The API and the web client send nosniff, DENY, and a CSP that sets
   frame-ancestors to none. Message text is rendered as text. The refresh cookie is HttpOnly,
   SameSite=Lax, and limited to `/api/v1/auth`, so it is not a CSRF token for
   task writes. State-changing routes still require a Bearer token.
-- `.github/workflows/ci.yml` runs `pip-audit` and `npm audit --audit-level=high`.
-  That scan has not run in GitHub Actions yet.
+- `.github/workflows/ci.yml` defines `pip-audit` and `npm audit --audit-level=high` jobs, and a Postgres 16 job that runs `alembic upgrade head` and `python -m pytest`. This review did not run that workflow.
 
 ## Phase 11 — Observability
 

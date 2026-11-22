@@ -57,13 +57,11 @@ COPY --from=builder /build/apps/worker /app/apps/worker
 
 USER jarvis
 
-# No HTTP server/API surface on this service. The worker exposes a local,
-# loopback-only health endpoint (apps/worker/jarvis_worker/health.py) bound
-# to 127.0.0.1:${WORKER_HEALTH_PORT} (default 8091) that reports process
-# status, DB reachability, and queue depth. Use it instead of a generic
-# process-liveness check.
+# Health endpoints bind to 127.0.0.1:${WORKER_HEALTH_PORT} (default 8091).
+# Readiness includes database reachability; Kubernetes uses /live separately so
+# a database outage does not restart an otherwise running worker.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import os,urllib.request,sys; port=os.environ.get('WORKER_HEALTH_PORT','8091'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/'%port, timeout=3).status==200 else 1)"
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/ready' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=3)"
 
 # Configuration is supplied entirely via environment variables, consumed by
 # app.config.settings (pydantic-settings). No secrets are baked into the image.

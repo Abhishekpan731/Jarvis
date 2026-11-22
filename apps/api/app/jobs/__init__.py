@@ -5,9 +5,9 @@ is never called while a transaction is open. Lease tokens are minted here,
 never accepted from an HTTP client.
 
 RLS is a second barrier, not a replacement for the explicit WHERE user_id
-filters below. The worker claims jobs across tenants by design, so these
-helpers set the app.worker escape-hatch GUC (and the owning tenant's
-app.user_id when resolvable) before touching RLS-forced tables.
+filters below. Cross-tenant queue access requires the authenticated
+`jarvis_worker` database login; the transaction-local app.user_id still scopes
+tenant-owned task and integration rows.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -45,9 +44,7 @@ PERMANENT_ERRORS = frozenset(
 
 
 async def _enter_worker_scope(session: AsyncSession, job_id: uuid.UUID) -> None:
-    """Mark this transaction as the worker's and, when the job is resolvable,
-    also scope it to that job's owner (defense in depth alongside app.worker).
-    """
+    """Scope subsequent task work to the job owner after the worker role reads it."""
     await set_worker_guc(session)
     owner = (
         await session.execute(text("SELECT user_id FROM jobs WHERE id = :id"), {"id": job_id})

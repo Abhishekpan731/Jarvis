@@ -46,7 +46,9 @@ _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.CANCELLED,
         }
     ),
-    TaskStatus.WAITING_FOR_APPROVAL: frozenset({TaskStatus.EXECUTING, TaskStatus.CANCELLED}),
+    TaskStatus.WAITING_FOR_APPROVAL: frozenset(
+        {TaskStatus.EXECUTING, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    ),
     TaskStatus.EXECUTING: frozenset(
         {
             TaskStatus.VERIFYING,

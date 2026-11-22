@@ -3,16 +3,15 @@
 import uuid
 
 import pytest
-from sqlalchemy import select, text
-
 from app.ai.base import NotConfigured
 from app.ai.provider_factory import get_model
 from app.ai.schemas import Plan, PlanStep
 from app.ai.supervisor import plan_request, validate_plan
 from app.db import session_scope, set_tenant_guc
 from app.execution import execute_task
-from app.models import Message, Task, TaskStep
+from app.models import Task, TaskStep
 from app.tasks_service import create_task_from_plan
+from sqlalchemy import text
 
 
 async def _register(client):

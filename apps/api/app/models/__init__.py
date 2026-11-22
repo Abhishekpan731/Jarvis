@@ -22,10 +22,21 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
+from sqlalchemy.types import UserDefinedType
+
+from app.db import Base
 
 _TZ = DateTime(timezone=True)
 
-from app.db import Base
+
+class Vector1536(UserDefinedType):
+    """SQLAlchemy mapping for PostgreSQL's existing vector(1536) type."""
+
+    cache_ok = True
+
+    def get_col_spec(self, **kw: object) -> str:
+        """Render this mapping using the database's fixed vector dimension."""
+        return "vector(1536)"
 
 
 def _uuid() -> Mapped[uuid.UUID]:
@@ -111,6 +122,8 @@ class Task(Base):
     result: Mapped[dict | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
     heartbeat_at: Mapped[datetime | None] = mapped_column(_TZ)
+    approval_expires_at: Mapped[datetime | None] = mapped_column(_TZ)
+    approval_action_hash: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(_TZ, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         _TZ, server_default=func.now(), onupdate=func.now()
@@ -253,20 +266,46 @@ class Message(Base):
 
 class Memory(Base):
     __tablename__ = "memories"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('proposed', 'confirmed')",
+            name="memories_status_valid",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid()
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     category: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    privacy_class: Mapped[str] = mapped_column(Text, nullable=False, server_default="normal")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="proposed")
+    privacy_class: Mapped[str] = mapped_column(Text, nullable=False, server_default="sensitive")
     active: Mapped[bool] = mapped_column(nullable=False, server_default="true")
     source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("conversations.id"))
     source_message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"))
+    embedding: Mapped[str | None] = mapped_column(Vector1536())
     created_at: Mapped[datetime] = mapped_column(_TZ, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         _TZ, server_default=func.now(), onupdate=func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(_TZ)
+
+
+class RateLimitWindow(Base):
+    """One rate-limit counter for a bucket and fixed window."""
+
+    __tablename__ = "rate_limit_windows"
+    __table_args__ = (
+        CheckConstraint(
+            "request_count > 0",
+            name="rate_limit_windows_count_positive",
+        ),
+    )
+
+    bucket_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(_TZ, primary_key=True)
+    request_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
 
 
 class AuditLog(Base):

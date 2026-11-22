@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from app.briefing import due, run_due
-from app.db import session_scope, set_worker_guc
+from app.db import worker_session_scope
 
 
 async def _register(client, name: str) -> dict:
@@ -67,12 +67,10 @@ async def test_due_briefing_is_written_once_and_not_visible_to_another_user(clie
         json={"hour": 0, "minute": 0, "timezone": "UTC", "enabled": True},
     )
     now = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
-    async with session_scope() as session:
-        await set_worker_guc(session)
+    async with worker_session_scope() as session:
         first = await run_due(session, now)
         await session.commit()
-    async with session_scope() as session:
-        await set_worker_guc(session)
+    async with worker_session_scope() as session:
         second = await run_due(session, now)
         await session.commit()
     assert first >= 1
@@ -118,12 +116,10 @@ async def test_a_reminder_is_private_and_fires_once(client):
     assert reserved.status_code == 422
 
     now = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
-    async with session_scope() as session:
-        await set_worker_guc(session)
+    async with worker_session_scope() as session:
         await run_due(session, now)
         await session.commit()
-    async with session_scope() as session:
-        await set_worker_guc(session)
+    async with worker_session_scope() as session:
         await run_due(session, now)
         await session.commit()
 

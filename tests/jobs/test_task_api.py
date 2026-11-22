@@ -1,11 +1,13 @@
 """Task API. Cross-user access is 404, not 403, and lease fields are ignored."""
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.ai.schemas import Plan, PlanStep
 from app.db import session_scope, set_tenant_guc
 from app.jobs import IdempotencyConflict, request_hash, resolve_idempotency
+from app.routers.tasks import _approval_is_expired
 from app.tasks_service import create_task_from_plan
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -306,3 +308,153 @@ async def test_client_cannot_set_user_lease_or_status(client):
             json={"instruction": "research compare the two libraries", **extra},
         )
         assert rejected.status_code == 400, extra
+
+
+async def _create_approval_task(client, headers: dict) -> dict:
+    created = await client.post(
+        "/api/v1/tasks",
+        headers=headers,
+        json={"instruction": "research compare the libraries and send the result"},
+    )
+    assert created.status_code == 200, created.text
+    return created.json()
+
+
+@pytest.mark.asyncio
+async def test_approval_binds_exact_hash_and_creates_one_job(client):
+    headers = await _register(client, "approve")
+    created = await _create_approval_task(client, headers)
+    action_hash = created["approval_action_hash"]
+    assert len(action_hash) == 64
+    assert created["approval_expires_at"] is not None
+    assert created["job"] is None
+
+    url = f"/api/v1/tasks/{created['id']}/approve"
+    body = {"action_hash": action_hash}
+    first = await client.post(url, headers=headers, json=body)
+    replay = await client.post(url, headers=headers, json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "executing"
+    assert first.json()["job"]["status"] == "queued"
+    assert replay.status_code == 200, replay.text
+    assert first.json()["job"]["id"] == replay.json()["job"]["id"]
+    assert (await _counts(await _user_id(client, headers))) == (1, 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_approval_hash_mismatch_and_foreign_owner_are_rejected(client):
+    owner = await _register(client, "approval-owner")
+    other = await _register(client, "approval-other")
+    created = await _create_approval_task(client, owner)
+    url = f"/api/v1/tasks/{created['id']}/approve"
+    foreign = await client.post(
+        url, headers=other, json={"action_hash": created["approval_action_hash"]}
+    )
+    mismatch = await client.post(url, headers=owner, json={"action_hash": "0" * 64})
+    assert foreign.status_code == 404
+    assert mismatch.status_code == 409
+
+    user_id = await _user_id(client, owner)
+    async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
+        await session.execute(
+            text("UPDATE task_steps SET action = 'changed after approval' WHERE task_id = :id"),
+            {"id": uuid.UUID(created["id"])},
+        )
+        await session.commit()
+    changed_plan = await client.post(
+        url, headers=owner, json={"action_hash": created["approval_action_hash"]}
+    )
+    assert changed_plan.status_code == 409
+    assert (await _counts(user_id)) == (1, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_reject_decision_is_idempotent_and_does_not_enqueue(client):
+    headers = await _register(client, "reject")
+    created = await _create_approval_task(client, headers)
+    url = f"/api/v1/tasks/{created['id']}/reject"
+    body = {"action_hash": created["approval_action_hash"]}
+    first = await client.post(url, headers=headers, json=body)
+    replay = await client.post(url, headers=headers, json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "cancelled"
+    assert first.json()["error"] == "approval_rejected"
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["job"] is None
+    conflict = await client.post(
+        f"/api/v1/tasks/{created['id']}/approve", headers=headers, json=body
+    )
+    assert conflict.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_becomes_failed_once_and_rejects_late_decisions(client):
+    headers = await _register(client, "expired")
+    created = await _create_approval_task(client, headers)
+    user_id = await _user_id(client, headers)
+    async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
+        await session.execute(
+            text("UPDATE tasks SET approval_expires_at = now() - interval '1 second' WHERE id = :id"),
+            {"id": uuid.UUID(created["id"])},
+        )
+        await session.commit()
+
+    approve_url = f"/api/v1/tasks/{created['id']}/approve"
+    body = {"action_hash": created["approval_action_hash"]}
+    expired = await client.post(approve_url, headers=headers, json=body)
+    expired_replay = await client.post(approve_url, headers=headers, json=body)
+    late_reject = await client.post(
+        f"/api/v1/tasks/{created['id']}/reject", headers=headers, json=body
+    )
+    assert expired.status_code == expired_replay.status_code == late_reject.status_code == 410
+    assert (await _counts(user_id)) == (1, 0, 0)
+
+    task = await client.get(f"/api/v1/tasks/{created['id']}", headers=headers)
+    assert task.json()["status"] == "failed"
+    assert task.json()["error"] == "approval_expired"
+    async with session_scope() as session:
+        await set_tenant_guc(session, user_id)
+        events = (
+            await session.execute(
+                text(
+                    "SELECT from_status, to_status, reason, actor FROM task_events "
+                    "WHERE task_id = :id AND reason = 'approval_expired'"
+                ),
+                {"id": uuid.UUID(created["id"])},
+            )
+        ).all()
+    assert [tuple(event) for event in events] == [
+        ("waiting_for_approval", "failed", "approval_expired", "system")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_waiting_task_can_be_cancelled_without_a_job(client):
+    headers = await _register(client, "cancel-waiting")
+    created = await _create_approval_task(client, headers)
+    cancelled = await client.post(f"/api/v1/tasks/{created['id']}/cancel", headers=headers)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["job"] is None
+
+
+@pytest.mark.parametrize(
+    ("seconds_after_expiry", "expired"),
+    [(-1, False), (0, True), (1, True)],
+)
+def test_approval_expiry_boundary(seconds_after_expiry, expired):
+    expires_at = datetime(2026, 1, 1, tzinfo=UTC)
+    now = expires_at + timedelta(seconds=seconds_after_expiry)
+    assert _approval_is_expired(expires_at, now) is expired
+
+
+@pytest.mark.asyncio
+async def test_task_creation_without_key_keeps_legacy_non_idempotent_contract(client):
+    headers = await _register(client, "legacy-create")
+    body = {"instruction": "research compare the two libraries"}
+    first = await client.post("/api/v1/tasks", headers=headers, json=body)
+    second = await client.post("/api/v1/tasks", headers=headers, json=body)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] != second.json()["id"]

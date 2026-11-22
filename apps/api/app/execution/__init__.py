@@ -1,14 +1,10 @@
-"""Task execution.
+"""Task execution helpers used by the worker and tests.
 
-There is no worker process yet (that is Phase 6), so this is the execution
-path: it drives a task through the legal state transitions and runs the task's
-steps. Steps of one task do not depend on each other, so they run concurrently.
-Tasks are independent of each other, so several tasks run concurrently too.
-
-What stays sequential is the state machine itself. CREATED, UNDERSTANDING,
-PLANNING, EXECUTING, VERIFYING, and COMPLETED describe one task, and a task
-can only be in one of them at a time. Running those transitions in parallel
-would be illegal, not faster.
+``execute_task`` is an in-process helper that runs independent steps
+concurrently. The durable worker uses ``execute_task_durable`` instead; it
+runs and persists steps sequentially with lease checks. Both paths validate
+permissions and follow the shared task state machine. The worker process lives
+in ``apps/worker``.
 """
 
 import asyncio
@@ -177,6 +173,23 @@ async def _resume_to_executing(task: Task, persist, still_owner) -> None:
         task.status = target.value
 
 
+async def _fail_expired_approval(task: Task, persist) -> bool:
+    """Persist failure for an expired approval before any step can run."""
+    if task.status != TaskStatus.WAITING_FOR_APPROVAL.value:
+        return False
+    expires_at = task.approval_expires_at
+    if expires_at is None or expires_at > datetime.now(UTC):
+        return False
+    try:
+        apply_transition(TaskStatus.WAITING_FOR_APPROVAL, TaskStatus.FAILED)
+    except IllegalTransition as exc:
+        raise RuntimeError("illegal_transition") from exc
+    await persist(task, TaskStatus.FAILED, "worker", "approval_expired")
+    task.status = TaskStatus.FAILED.value
+    task.error = "approval_expired"
+    return True
+
+
 async def execute_task_durable(
     task: Task,
     steps: Sequence[TaskStep],
@@ -195,6 +208,8 @@ async def execute_task_durable(
     started = datetime.now(UTC)
     if not await still_owner():
         raise LeaseLost
+    if await _fail_expired_approval(task, persist):
+        raise RuntimeError("approval_required")
 
     await _resume_to_executing(task, persist, still_owner)
     if task.status in (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value):

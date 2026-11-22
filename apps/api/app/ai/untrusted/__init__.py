@@ -1,9 +1,9 @@
 """Wrap stored text so it cannot become an instruction.
 
-Memory, conversation summaries, and retrieved mail or calendar facts are data.
-They are quoted, labelled, and stripped of a forged role marker before they
-reach a model. The wrapper does not decide permissions. That check is separate
-and does not read this text.
+The current context builder quotes memories and conversation summaries before
+they reach a model. Other provider text would also be untrusted if added to
+context. The wrapper does not decide permissions; that check is separate and
+does not read this text.
 """
 
 from __future__ import annotations

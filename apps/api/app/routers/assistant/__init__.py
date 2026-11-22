@@ -25,11 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.provider_factory import NotConfigured, get_model
 from app.ai.supervisor import plan_request
-from app.observe import record_usage
 from app.db import get_session
 from app.integrations.requirements import missing_connection
-from app.limits import limit_writes
+from app.limits import limit_writes_durable
 from app.models import Conversation, Device, Message, SyncEvent, User
+from app.observe import record_usage
 from app.security import error, require_user
 from app.tasks_service import create_task_from_plan
 
@@ -77,7 +77,8 @@ async def _device(session: AsyncSession, user: User, device_id: uuid.UUID | None
 
 
 async def _conversation(
-    session: AsyncSession, user: User, conversation_id: uuid.UUID | None
+    session: AsyncSession, user: User, conversation_id: uuid.UUID | None,
+    device: Device | None = None,
 ) -> Conversation:
     if conversation_id is not None:
         row = await session.get(Conversation, conversation_id)
@@ -89,6 +90,10 @@ async def _conversation(
     row = Conversation(id=uuid.uuid4(), user_id=user.id, title="Assistant", status="active")
     session.add(row)
     await session.flush()
+    await _record(
+        session, user, device, "conversation.created",
+        {"conversation": _conversation_payload(row)},
+    )
     return row
 
 
@@ -105,6 +110,38 @@ async def _record(
     )
 
 
+def _conversation_payload(conversation: Conversation) -> dict:
+    """Serialize conversation metadata without message content."""
+    return {
+        "id": str(conversation.id),
+        "title": conversation.title,
+        "status": conversation.status,
+        "created_at": conversation.created_at.isoformat(),
+        "updated_at": conversation.updated_at.isoformat(),
+    }
+
+
+async def _record_message(
+    session: AsyncSession, user: User, device: Device | None,
+    conversation: Conversation, message: Message,
+) -> None:
+    """Flush a message before publishing its owner-scoped sync event."""
+    await session.flush()
+    await _record(
+        session, user, device, "message.created",
+        {
+            "conversation_id": str(conversation.id),
+            "message": {
+                "id": str(message.id),
+                "role": message.role,
+                "content": message.content,
+                "content_type": message.content_type,
+                "created_at": message.created_at.isoformat(),
+            },
+        },
+    )
+
+
 @router.post("/commands", status_code=202)
 async def submit_command(
     body: CommandIn,
@@ -112,7 +149,7 @@ async def submit_command(
     session: AsyncSession = Depends(get_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
-    limit_writes(user.id)
+    """Submit one command; an existing owner-scoped replay is free."""
     command = _check(body)
     device = await _device(session, user, body.device_id)
 
@@ -121,18 +158,25 @@ async def submit_command(
         if prior is not None:
             return prior
 
-    conversation = await _conversation(session, user, body.conversation_id)
+    # Charge only new submissions; retries replay before consuming another slot.
+    await limit_writes_durable(user.id)
+
+    conversation = await _conversation(session, user, body.conversation_id, device)
     conversation.updated_at = datetime.now(UTC)
-    session.add(
-        Message(
-            id=uuid.uuid4(),
-            conversation_id=conversation.id,
-            user_id=user.id,
-            role="user",
-            content=command,
-            content_type="text",
-        )
+    await _record(
+        session, user, device, "conversation.updated",
+        {"conversation": _conversation_payload(conversation)},
     )
+    user_message = Message(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        user_id=user.id,
+        role="user",
+        content=command,
+        content_type="text",
+    )
+    session.add(user_message)
+    await _record_message(session, user, device, conversation, user_message)
 
     try:
         model = get_model()
@@ -168,16 +212,16 @@ async def submit_command(
 
     assistant = _device_handoff(body.source, model, plan)
     reply = handoff_reply(assistant) if assistant else _reply_text(plan, missing)
-    session.add(
-        Message(
-            id=uuid.uuid4(),
-            conversation_id=conversation.id,
-            user_id=user.id,
-            role="assistant",
-            content=reply,
-            content_type="text",
-        )
+    assistant_message = Message(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        user_id=user.id,
+        role="assistant",
+        content=reply,
+        content_type="text",
     )
+    session.add(assistant_message)
+    await _record_message(session, user, device, conversation, assistant_message)
     result = {
         "request_id": idempotency_key or str(uuid.uuid4()),
         "conversation_id": str(conversation.id),

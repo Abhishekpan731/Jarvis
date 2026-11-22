@@ -9,8 +9,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
 from jarvis_shared.integrations import PROVIDERS, get_provider
+from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,7 @@ from app.ai.base import NotConfigured, ProviderError
 from app.db import get_session
 from app.integrations import google
 from app.integrations.crypto import seal
-from app.models import Integration, OAuthState, User
+from app.models import AuditLog, Integration, OAuthState, User
 from app.security import error, require_user
 
 router = APIRouter(prefix="/api/v1/integrations", tags=["integrations"])
@@ -88,10 +88,6 @@ async def connect(
         raise HTTPException(404, error("unknown_provider", "That integration does not exist."))
     if not google.configured():
         raise _not_configured()
-    try:
-        seal({"probe": True})
-    except NotConfigured:
-        raise _not_configured() from None
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     session.add(
@@ -145,6 +141,15 @@ async def callback(
             400, error("token_exchange_failed", "Google refused the code. Start the connection again.")
         ) from None
     await _store(session, claimed, ciphertext)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            actor="user",
+            action="integration_connect",
+            target_type="integration",
+            target_id=claimed.provider,
+        )
+    )
     await session.commit()
     return {"connected": True, "provider": claimed.provider}
 
@@ -228,5 +233,14 @@ async def disconnect(
     row.token_ciphertext = None
     row.revoked_at = now
     row.updated_at = now
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            actor="user",
+            action="integration_disconnect",
+            target_type="integration",
+            target_id=provider,
+        )
+    )
     await session.commit()
     return {"disconnected": True, "provider": provider}

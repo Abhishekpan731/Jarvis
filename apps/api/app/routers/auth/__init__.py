@@ -4,6 +4,7 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models import AuditLog, User, UserPreferences
+from app.models import AuditLog, Session, User, UserPreferences
 from app.security import (
     REFRESH_COOKIE,
     access_token_for,
@@ -53,6 +54,12 @@ class Credentials(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str = Field(min_length=8, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class PreferencesUpdate(BaseModel):
+    """Fields a user may update in their own preferences."""
+    timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    briefing_language: Literal["en", "hi"] | None = None
 
 
 def _throttle(key: str) -> None:
@@ -160,6 +167,105 @@ async def current(user: User = Depends(require_user)) -> dict:
     return {"user": _profile(user)}
 
 
+@router.get("/preferences")
+async def get_preferences(
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Return the authenticated user's saved preferences."""
+    preferences = await session.get(UserPreferences, user.id)
+    if preferences is None:
+        raise HTTPException(404, error("preferences_not_found", "Preferences not found."))
+    return {"preferences": _preferences(preferences)}
+
+
+@router.patch("/preferences")
+async def update_preferences(
+    body: PreferencesUpdate,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Update selected preferences for the authenticated user."""
+    preferences = await session.get(UserPreferences, user.id)
+    if preferences is None:
+        raise HTTPException(404, error("preferences_not_found", "Preferences not found."))
+    updates = body.model_dump(exclude_unset=True)
+    if not updates or any(value is None for value in updates.values()):
+        raise HTTPException(422, error("invalid_preferences", "Provide preference values."))
+    for field, value in updates.items():
+        setattr(preferences, field, value)
+    await session.commit()
+    return {"preferences": _preferences(preferences)}
+
+
+@router.get("/sessions")
+async def list_sessions(
+    request: Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """List this user's active sessions without exposing credentials."""
+    current_id = uuid.UUID(_payload(request)["sid"])
+    rows = (
+        await session.execute(
+            select(Session)
+            .where(
+                Session.user_id == user.id,
+                Session.revoked_at.is_(None),
+                Session.expires_at > datetime.now(UTC),
+            )
+            .order_by(Session.created_at.desc())
+        )
+    ).scalars()
+    return {
+        "sessions": [
+            {
+                "id": str(row.id),
+                "user_agent": row.user_agent,
+                "created_at": row.created_at,
+                "expires_at": row.expires_at,
+                "current": row.id == current_id,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.delete("/sessions/{session_id}")
+async def revoke_owned_session(
+    session_id: uuid.UUID,
+    request: Request,
+    response: Response,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Revoke one session only when it belongs to the authenticated user."""
+    row = (
+        await session.execute(
+            select(Session)
+            .where(Session.id == session_id, Session.user_id == user.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, error("session_not_found", "Session not found."))
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(UTC)
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                actor="user",
+                action="session_revoke",
+                target_type="session",
+                target_id=str(row.id),
+            )
+        )
+    await session.commit()
+    if session_id == uuid.UUID(_payload(request)["sid"]):
+        response.delete_cookie(REFRESH_COOKIE, path="/api/v1/auth")
+    return {"revoked": True}
+
+
 @router.post("/password")
 async def change_password(
     body: PasswordChange,
@@ -195,6 +301,14 @@ async def delete_account(
 
 def _profile(user: User) -> dict:
     return {"id": str(user.id), "email": user.email, "display_name": user.display_name}
+
+
+def _preferences(preferences: UserPreferences) -> dict:
+    """Serialize preferences without exposing user or database identifiers."""
+    return {
+        "timezone": preferences.timezone,
+        "briefing_language": preferences.briefing_language,
+    }
 
 
 def _payload(request: Request) -> dict:

@@ -66,6 +66,7 @@ services:
     environment:
       DATABASE_URL_SYNC: postgresql+psycopg://jarvis:jarvis@postgres:5432/jarvis
       JARVIS_APP_DB_PASSWORD: ${JARVIS_APP_DB_PASSWORD:-change-me-app}
+      JARVIS_WORKER_DB_PASSWORD: ${JARVIS_WORKER_DB_PASSWORD:?Set JARVIS_WORKER_DB_PASSWORD for the jarvis_worker role}
     command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
     depends_on:
       postgres:
@@ -112,7 +113,7 @@ services:
       context: .
       dockerfile: apps/worker/Dockerfile
     environment:
-      DATABASE_URL: postgresql+asyncpg://jarvis_app:${JARVIS_APP_DB_PASSWORD:-change-me-app}@postgres:5432/jarvis
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL:?Set WORKER_DATABASE_URL with jarvis_worker credentials}
       REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       FERNET_KEY: ${FERNET_KEY:-}

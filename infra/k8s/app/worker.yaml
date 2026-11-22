@@ -29,6 +29,39 @@ spec:
           imagePullPolicy: IfNotPresent
           envFrom:
             - secretRef: {name: jarvis-worker-secret}
+          env:
+            - name: WORKER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-worker-secret
+                  key: WORKER_DATABASE_URL
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/live' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=2)"
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/live' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=2)"
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/ready' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=3)"
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests: {cpu: "100m", memory: "256Mi"}
             limits: {cpu: "500m", memory: "512Mi"}

@@ -38,13 +38,20 @@ class OpenAIModel:
         return Completion(text=choice, model=self.model, provider=self.name, usage=usage)
 
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        self._usage = Usage()
         try:
             stream = await self._client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 stream=True,  # type: ignore[arg-type]
+                stream_options={"include_usage": True},
             )
             async for chunk in stream:  # type: ignore[union-attr]
+                if chunk.usage is not None:
+                    self._usage = Usage(
+                        input_tokens=chunk.usage.prompt_tokens or 0,
+                        output_tokens=chunk.usage.completion_tokens or 0,
+                    )
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     yield delta

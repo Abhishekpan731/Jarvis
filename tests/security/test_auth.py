@@ -131,3 +131,103 @@ async def test_users_cannot_see_each_others_conversations(client):
     other = {"Authorization": f"Bearer {second.json()['access_token']}"}
     leaked = await client.get(f"/api/v1/conversations/{conversation_id}", headers=other)
     assert leaked.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_preferences_are_read_and_updated_for_the_authenticated_user(client):
+    first = await _register(client)
+    second = await _register(client)
+    first_headers = {"Authorization": f"Bearer {first.json()['access_token']}"}
+    second_headers = {"Authorization": f"Bearer {second.json()['access_token']}"}
+
+    initial = await client.get("/api/v1/auth/preferences", headers=first_headers)
+    assert initial.status_code == 200
+    assert initial.json()["preferences"] == {"timezone": "UTC", "briefing_language": "en"}
+
+    updated = await client.patch(
+        "/api/v1/auth/preferences",
+        headers=first_headers,
+        json={"timezone": "America/Los_Angeles", "briefing_language": "hi"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["preferences"] == {
+        "timezone": "America/Los_Angeles",
+        "briefing_language": "hi",
+    }
+
+    other_user_preferences = await client.get(
+        "/api/v1/auth/preferences", headers=second_headers
+    )
+    assert other_user_preferences.status_code == 200
+    assert other_user_preferences.json()["preferences"] == {
+        "timezone": "UTC",
+        "briefing_language": "en",
+    }
+
+    invalid = await client.patch(
+        "/api/v1/auth/preferences",
+        headers=first_headers,
+        json={"briefing_language": "fr"},
+    )
+    assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_session_listing_revocation_ownership_and_repeated_calls(client):
+    password = "test-only-session-password-123"
+    first = await _register(client, password=password)
+    first_token = first.json()["access_token"]
+    first_headers = {"Authorization": f"Bearer {first_token}"}
+    another_session = await client.post(
+        "/api/v1/auth/login",
+        json={"email": first.json()["user"]["email"], "password": password},
+    )
+    assert another_session.status_code == 200
+
+    listed = await client.get("/api/v1/auth/sessions", headers=first_headers)
+    assert listed.status_code == 200
+    sessions = listed.json()["sessions"]
+    assert len(sessions) == 2
+    assert sum(item["current"] for item in sessions) == 1
+    current = next(item for item in sessions if item["current"])
+    other_session = next(item for item in sessions if not item["current"])
+
+    revoked = await client.delete(
+        f"/api/v1/auth/sessions/{other_session['id']}", headers=first_headers
+    )
+    repeated = await client.delete(
+        f"/api/v1/auth/sessions/{other_session['id']}", headers=first_headers
+    )
+    assert revoked.status_code == 200
+    assert repeated.status_code == 200
+    remaining = await client.get("/api/v1/auth/sessions", headers=first_headers)
+    assert [item["id"] for item in remaining.json()["sessions"]] == [current["id"]]
+
+    second_user = await _register(client)
+    second_headers = {"Authorization": f"Bearer {second_user.json()['access_token']}"}
+    second_sessions = await client.get(
+        "/api/v1/auth/sessions", headers=second_headers
+    )
+    foreign_id = second_sessions.json()["sessions"][0]["id"]
+    foreign_revoke = await client.delete(
+        f"/api/v1/auth/sessions/{foreign_id}", headers=first_headers
+    )
+    assert foreign_revoke.status_code == 404
+    assert (await client.get("/api/v1/auth/session", headers=second_headers)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_logout_only_revokes_the_current_session(client):
+    password = "test-only-logout-password-123"
+    registered = await _register(client, password=password)
+    earlier_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+    logged_in = await client.post(
+        "/api/v1/auth/login",
+        json={"email": registered.json()["user"]["email"], "password": password},
+    )
+    current_headers = {"Authorization": f"Bearer {logged_in.json()['access_token']}"}
+
+    logout = await client.post("/api/v1/auth/logout", headers=current_headers)
+    assert logout.status_code == 200
+    assert (await client.get("/api/v1/auth/session", headers=current_headers)).status_code == 401
+    assert (await client.get("/api/v1/auth/session", headers=earlier_headers)).status_code == 200

@@ -6,24 +6,79 @@ reply stay in the conversation tables, which this module does not query.
 
 from __future__ import annotations
 
+import atexit
 import logging
+import threading
 import uuid
 
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.schemas import Usage
 from app.ai.usage import estimate_cost_usd
+from app.config import settings
 from app.db import set_worker_guc
 from app.models import ModelUsage
 
 log = logging.getLogger("jarvis.observe")
 
 
+_tracer_provider: TracerProvider | None = None
+_tracer_provider_lock = threading.Lock()
+
+
+def _get_tracer_provider() -> TracerProvider | None:
+    """Return the lazy OTLP provider, or None while export is disabled."""
+    global _tracer_provider
+    endpoint = settings.otel_exporter_otlp_endpoint.strip()
+    if not endpoint:
+        return None
+    with _tracer_provider_lock:
+        if _tracer_provider is None:
+            exporter = OTLPSpanExporter(endpoint=f"{endpoint.rstrip('/')}/v1/traces")
+            provider = TracerProvider(
+                resource=Resource({"service.name": "jarvis-api"}),
+                shutdown_on_exit=False,
+            )
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            _tracer_provider = provider
+        return _tracer_provider
+
+
 def trace(event: str, **fields: str | int) -> None:
-    """Log an event that contains no user content."""
+    """Keep the existing log trace and export only the fixed usage event."""
     safe = " ".join(f"{key}={value}" for key, value in sorted(fields.items()))
     log.info("%s %s", event, safe)
+    if event != "model_usage":
+        return
+    try:
+        provider = _get_tracer_provider()
+    except ValueError:
+        log.warning("OTLP tracing initialization failed")
+        return
+    if provider is not None:
+        with provider.get_tracer("jarvis.observe").start_as_current_span("model_usage"):
+            pass
+
+
+def shutdown_telemetry() -> None:
+    """Flush and stop the OTLP provider during normal process shutdown."""
+    global _tracer_provider
+    with _tracer_provider_lock:
+        provider = _tracer_provider
+        _tracer_provider = None
+    if provider is not None:
+        try:
+            provider.force_flush()
+        finally:
+            provider.shutdown()
+
+
+atexit.register(shutdown_telemetry)
 
 
 async def record_usage(

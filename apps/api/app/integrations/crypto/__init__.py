@@ -17,6 +17,16 @@ def _fernet() -> Fernet:
         raise NotConfigured("FERNET_KEY is not a valid Fernet key.") from exc
 
 
+
+def configured() -> bool:
+    """Return whether FERNET_KEY can initialize token encryption."""
+    try:
+        _fernet()
+    except NotConfigured:
+        return False
+    return True
+
+
 def seal(tokens: dict) -> str:
     """Encrypt a token dict. The caller never persists the dict itself."""
     raw = json.dumps(tokens, separators=(",", ":")).encode()

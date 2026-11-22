@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import uuid
 
+from jarvis_shared.integrations import provider_for_agent
 from sqlalchemy import select
 
 from app.ai.base import NotConfigured, ProviderError
-from app.db import session_scope, set_tenant_guc
+from app.db import set_tenant_guc, worker_session_scope
 from app.integrations import google
 from app.integrations.crypto import open_tokens, seal
 from app.models import Integration, TaskStep
-from jarvis_shared.integrations import provider_for_agent
 
 
 class IntegrationStepError(Exception):
@@ -26,7 +26,7 @@ class IntegrationStepError(Exception):
 async def run_step(user_id: uuid.UUID, step: TaskStep) -> str:
     provider = provider_for_agent(step.agent_id)
     if provider is None:
-        return f"{step.agent_id}: completed"
+        raise IntegrationStepError("agent_not_implemented")
     if not google.configured():
         raise IntegrationStepError("integration_not_configured")
     tokens = await _load(user_id, provider)
@@ -44,7 +44,7 @@ async def run_step(user_id: uuid.UUID, step: TaskStep) -> str:
 
 
 async def _load(user_id: uuid.UUID, provider: str) -> dict | None:
-    async with session_scope() as session:
+    async with worker_session_scope() as session:
         await set_tenant_guc(session, user_id)
         row = (
             await session.execute(
@@ -80,7 +80,7 @@ async def _read(user_id: uuid.UUID, provider: str, tokens: dict) -> str:
 
 async def _save(user_id: uuid.UUID, provider: str, tokens: dict) -> None:
     ciphertext = seal({k: v for k, v in tokens.items() if v is not None})
-    async with session_scope() as session:
+    async with worker_session_scope() as session:
         await set_tenant_guc(session, user_id)
         row = (
             await session.execute(

@@ -1,0 +1,262 @@
+# Provider-neutral template only. Keep image, ingress, and TLS placeholders until externally configured; no live host/TLS is implied.
+# External Secret contract (provision values outside this template; never commit credentials):
+# - jarvis-api-production: API runtime values incl. DATABASE_URL (jarvis_app); exclude worker/migration DB variables.
+# - jarvis-worker-production: worker runtime values incl. WORKER_DATABASE_URL (jarvis_worker); exclude API/migration DB variables.
+# - jarvis-migrate-production: exactly DATABASE_URL_SYNC, JARVIS_APP_DB_PASSWORD, JARVIS_WORKER_DB_PASSWORD (migration/bootstrap only).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jarvis
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jarvis-job-reader
+  namespace: jarvis
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jarvis-job-reader
+  namespace: jarvis
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jarvis-job-reader
+  namespace: jarvis
+subjects:
+  - kind: ServiceAccount
+    name: jarvis-job-reader
+    namespace: jarvis
+roleRef:
+  kind: Role
+  name: jarvis-job-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: jarvis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example.invalid/jarvis-api:REPLACE_BEFORE_DEPLOY
+          env:
+            - name: DATABASE_URL_SYNC
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-migrate-production
+                  key: DATABASE_URL_SYNC
+            - name: JARVIS_APP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-migrate-production
+                  key: JARVIS_APP_DB_PASSWORD
+            - name: JARVIS_WORKER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-migrate-production
+                  key: JARVIS_WORKER_DB_PASSWORD
+          command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: jarvis
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      serviceAccountName: jarvis-job-reader
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: api}
+      initContainers:
+        - name: wait-for-migrate
+          image: registry.k8s.io/kubectl:v1.31.0
+          command: ["kubectl", "-n", "jarvis", "wait", "--for=condition=complete", "job/migrate", "--timeout=180s"]
+      containers:
+        # Same-origin ingress avoids CORS. If web/API origins are split, set CORS_ORIGINS below to the web origin; replace its placeholder when the domain is selected.
+        - name: api
+          image: registry.example.invalid/jarvis-api:REPLACE_BEFORE_DEPLOY
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: {name: jarvis-api-production}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-api-production
+                  key: DATABASE_URL
+            # Replace this placeholder when the production web origin is selected.
+            - name: CORS_ORIGINS
+              value: "https://your-web-origin.invalid"
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /api/v1/health, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: {path: /api/v1/health, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: jarvis
+spec:
+  type: ClusterIP
+  selector: {app: api}
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: jarvis
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: web}
+      containers:
+        - name: web
+          # Build with NEXT_PUBLIC_API_URL=https://jarvis.example.invalid (replace with the public ingress origin).
+          # NEXT_PUBLIC_* is baked into the browser bundle; a runtime pod env cannot change it.
+          image: registry.example.invalid/jarvis-web:REPLACE_BEFORE_DEPLOY
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet: {path: /, port: 3000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: {path: /, port: 3000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: jarvis
+spec:
+  type: ClusterIP
+  selector: {app: web}
+  ports:
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: jarvis
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      serviceAccountName: jarvis-job-reader
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: worker}
+      initContainers:
+        - name: wait-for-migrate
+          image: registry.k8s.io/kubectl:v1.31.0
+          command: ["kubectl", "-n", "jarvis", "wait", "--for=condition=complete", "job/migrate", "--timeout=180s"]
+      containers:
+        - name: worker
+          image: registry.example.invalid/jarvis-worker:REPLACE_BEFORE_DEPLOY
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: {name: jarvis-worker-production}
+          env:
+            - name: WORKER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: jarvis-worker-production
+                  key: WORKER_DATABASE_URL
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/live' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=2)"
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/live' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=2)"
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/ready' % os.environ.get('WORKER_HEALTH_PORT','8091'), timeout=3)"
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
